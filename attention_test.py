@@ -1,13 +1,15 @@
 from src.classes import *
+torch.set_default_dtype(torch.float64)
 
-true_model = LorenzModelPeriodicRho()
-model_zoo = [LorenzModel(rho = rho) for rho in np.arange(28,50,2)]
+feature_size, num_hidden, dropout, lr, epochs = 3, 20, 0.0, 1e-3, 100
+true_model = LorenzModelPeriodicRho(period = np.inf)
+model_zoo = [LorenzModel(rho=rho) for rho in np.arange(28,50,2)]
 lorenz_data = LorenzPeriodicRhoData(true_model, model_zoo)
-attention = AdditiveAttention(num_hiddens = 20, dropout = 0.0)
-keys, values, queries, ys = next(iter(lorenz_data.train_dataloader()))
-print(keys.size())
-print(values.size())
-print(queries.size())
-print(ys.size())
-a_out = attention(queries, keys, values)
-print(a_out.size())
+attention = AdditiveAttention(feature_size, num_hidden, dropout, lr)
+
+trainer = d2l.Trainer(max_epochs = epochs)
+trainer.fit(attention, lorenz_data)
+
+d2l.show_heatmaps([[attention.attention_weights.squeeze(1)]],
+                  xlabel='Model One-step Forecasts',
+                  ylabel='Batch Input')

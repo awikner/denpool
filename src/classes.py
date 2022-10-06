@@ -136,8 +136,8 @@ class LorenzDataModule(d2l.DataModule):
                                                shuffle=train)
         else:
             return torch.utils.data.DataLoader(dataset, self.val_size,
-                                               shuffle=train,
-                                               sampler=torch.utils.data.SequentialSampler())
+                                               shuffle=train)#,
+                                               #sampler=torch.utils.data.SequentialSampler())
 
 
 class LorenzPeriodicRhoData(LorenzDataModule):
@@ -153,40 +153,46 @@ class LorenzPeriodicRhoData(LorenzDataModule):
         model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
         for j, model in enumerate(model_zoo):
             model_data[:,j] = model.run_array(data[:-1])
-        self.keys    = torch.from_numpy(model_data[:-1]).float()
-        self.values  = torch.from_numpy(model_data[1:]).float()
-        self.queries = torch.from_numpy(data[1:-1]).float().unsqueeze(1)
-        self.y       = torch.from_numpy(data[2:]).float().unsqueeze(1)
+        self.keys    = torch.from_numpy(model_data[:-1])
+        self.values  = torch.from_numpy(model_data[1:])
+        self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
+        self.y       = torch.from_numpy(data[2:]).unsqueeze(1)
 
     def get_dataloader(self, train):
         i = slice(0, self.num_train) if train else slice(self.num_train, None)
-        return self.get_tensorloader((self.keys, self.values, self.queries, self.y), train, i)
+        return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
 
-class AdditiveAttention(torch.nn.Module):
+class AdditiveAttention(d2l.Module):
     """Additive attention."""
-    def __init__(self, num_hiddens, dropout, **kwargs):
+    def __init__(self, feature_size, num_hiddens, dropout, lr, sigma=0.01, **kwargs):
         super(AdditiveAttention, self).__init__(**kwargs)
-        self.W_k = torch.nn.LazyLinear(num_hiddens, bias=False)
-        self.W_q = torch.nn.LazyLinear(num_hiddens, bias=False)
-        self.w_v = torch.nn.LazyLinear(1, bias=False)
+        self.W_k = torch.normal(0, sigma, (feature_size, num_hiddens), requires_grad=True)
+        self.W_q = torch.normal(0, sigma, (feature_size, num_hiddens), requires_grad=True)
+        self.w_v = torch.normal(0, sigma, (num_hiddens, 1), requires_grad=True)
         self.dropout = torch.nn.Dropout(dropout)
+        self.sm = torch.nn.Softmax(dim = -1)
+        self.lr = lr
 
     def forward(self, queries, keys, values):
-        queries, keys = self.W_q(queries), self.W_k(keys)
-        print(queries.size())
-        print(keys.size())
-        print(self.W_k)
-        print(self.W_q)
+        W_queries, W_keys = torch.matmul(queries, self.W_q), torch.matmul(keys, self.W_k)
         # After dimension expansion, shape of queries: (batch_size, no. of
         # queries, 1, num_hiddens) and shape of keys: (batch_size, 1, no. of
         # key-value pairs, num_hiddens). Sum them up with broadcasting
-        features = queries.unsqueeze(2) + keys.unsqueeze(1)
-        features = torch.tanh(features)
+        features_unsqueezed = W_queries.unsqueeze(2) + W_keys.unsqueeze(1)
+        features = torch.tanh(features_unsqueezed)
         # There is only one output of self.w_v, so we remove the last
         # one-dimensional entry from the shape. Shape of scores: (batch_size,
         # no. of queries, no. of key-value pairs)
-        self.attention_weights = self.w_v(features).squeeze(-1)
+        scores = torch.matmul(features, self.w_v)
+        self.attention_weights = self.sm(scores.squeeze(-1))
         # self.attention_weights = masked_softmax(scores, valid_lens)
         # Shape of values: (batch_size, no. of key-value pairs, value
         # dimension)
         return torch.bmm(self.dropout(self.attention_weights), values)
+
+    def loss(self, y_hat, y):
+        l = (y_hat.reshape(-1) - y.reshape(-1)) **2 /2
+        return l.mean()
+
+    def configure_optimizers(self):
+        return torch.optim.Adam([self.W_k, self.W_q, self.w_v], self.lr)
