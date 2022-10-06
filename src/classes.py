@@ -136,8 +136,8 @@ class LorenzDataModule(d2l.DataModule):
                                                shuffle=train)
         else:
             return torch.utils.data.DataLoader(dataset, self.val_size,
-                                               shuffle=train)#,
-                                               #sampler=torch.utils.data.SequentialSampler())
+                                               shuffle=train,
+                                               sampler=torch.utils.data.SequentialSampler(dataset))
 
 
 class LorenzPeriodicRhoData(LorenzDataModule):
@@ -172,6 +172,7 @@ class AdditiveAttention(d2l.Module):
         self.dropout = torch.nn.Dropout(dropout)
         self.sm = torch.nn.Softmax(dim = -1)
         self.lr = lr
+        self.board = d2l.ProgressBoard(yscale = 'log')
 
     def forward(self, queries, keys, values):
         W_queries, W_keys = torch.matmul(queries, self.W_q), torch.matmul(keys, self.W_k)
@@ -194,5 +195,18 @@ class AdditiveAttention(d2l.Module):
         l = (y_hat.reshape(-1) - y.reshape(-1)) **2 /2
         return l.mean()
 
+    def validation_step(self, batch):
+        l = self.validation_loss(self.predict(*batch[:-1]), batch[-1])
+        self.plot('loss', l, train=False)
+
+    def validation_loss(self, y_hat, y, cutoff = 1.0):
+        err = torch.mean((y_hat.squeeze(1) - y.squeeze(1))**2, 1)
+        vt_arr  = torch.arange(0, len(err))[err > cutoff]
+        if len(vt_arr) == 0:
+            return len(err)
+        else:
+            return max(vt_arr[0] - 1, 0)
+
     def configure_optimizers(self):
         return torch.optim.Adam([self.W_k, self.W_q, self.w_v], self.lr)
+
