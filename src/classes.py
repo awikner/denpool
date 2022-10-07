@@ -123,6 +123,19 @@ class LorenzModelPeriodicRho():
     def rhofun(self, t):
         self.rho = 10 * np.sin(2 * np.pi * t / self.period + 1.5 * np.pi) + 38
 
+class NumpyModel(d2l.Module):
+    def __init__(self, numpy_model):
+        super().__init__()
+        if not hasattr(numpy_model, 'state'):
+            raise ValueError
+        self.numpy_model = numpy_model
+
+    def forward(self, X):
+        #print(X)
+        self.numpy_model.state = X.numpy()
+        self.numpy_model.forward()
+        return torch.from_numpy(self.numpy_model.state)
+
 class LorenzDataModule(d2l.DataModule):
     def __init__(self, val_size = 64):
         super().__init__()
@@ -139,6 +152,79 @@ class LorenzDataModule(d2l.DataModule):
                                                shuffle=train,
                                                sampler=torch.utils.data.SequentialSampler(dataset))
 
+# class ProgressBoardVT(d2l.ProgressBoard):
+#     """Plot data points in animation.
+#
+#     Defined in :numref:`sec_oo-design`"""
+#     def __init__(self, xlabel=None, ylabel=None, xlim=None,
+#                  ylim=None, xscale='linear', yscale='linear',
+#                  ls=['-', '--', '-.', ':'], colors=['C0', 'C1', 'C2', 'C3'],
+#                  fig=None, axes=None, figsize=(7, 2.5), display=True):
+#         self.save_hyperparameters()
+#
+#     def draw(self, x, y, label, every_n=1):
+#         raise NotImplemented
+#
+#     def draw(self, x, y, label, train = True, every_n=1):
+#         """Defined in :numref:`sec_utils`"""
+#         Point = d2l.collections.namedtuple('Point', ['x', 'y'])
+#         if not hasattr(self, 'raw_points'):
+#             self.raw_points = d2l.collections.OrderedDict()
+#             self.data = d2l.collections.OrderedDict()
+#         if label not in self.raw_points:
+#             self.raw_points[label] = []
+#             self.data[label] = []
+#         if train:
+#             points = self.raw_points[label]
+#             line = self.data[label]
+#             points.append(Point(x, y))
+#             if len(points) != every_n:
+#                 return
+#             mean = lambda x: sum(x) / len(x)
+#             line.append(Point(mean([p.x for p in points]),
+#                               mean([p.y for p in points])))
+#             points.clear()
+#         else:
+#
+#         if not self.display:
+#             return
+#         d2l.use_svg_display()
+#         if self.fig is None:
+#             self.fig, self.axes = d2l.plt.subplots(1, 2, figsize=self.figsize)
+#         plt_lines, labels = [], []
+#         for (k, v), ls, color in zip(self.data.items(), self.ls, self.colors):
+#             plt_lines.append(d2l.plt.plot([p.x for p in v], [p.y for p in v],
+#                                           linestyle=ls, color=color)[0])
+#             labels.append(k)
+#         axes = self.axes # if self.axes else d2l.plt.gca()
+#         if train:
+#             axis_idx = 0
+#         else:
+#             axis_idx = 1
+#         if self.xlim:
+#             if train:
+#                 axes[0].set_xlim(self.xlim[0])
+#             else:
+#                 axes[1].set_xlim(self.xlim[1])
+#         if self.ylim:
+#             if train:
+#                 axes[0].set_ylim(self.ylim[0])
+#             else:
+#                 axes[1].set_ylim(self.ylim[1])
+#         if not self.xlabel:
+#             if train:
+#                 self.xlabel[0] = self.x
+#             else:
+#                 self.xlabel[1] = ''
+#         for xlabel, ylabel, xscale, yscale, plt_lines, labels in \
+#             zip(self.xlabel, self.ylabel, self.xscale, self.yscale, plt_lines)
+#         axes.set_xlabel(self.xlabel)
+#         axes.set_ylabel(self.ylabel)
+#         axes.set_xscale(self.xscale)
+#         axes.set_yscale(self.yscale)
+#         axes.legend(plt_lines, labels)
+#         d2l.display.display(self.fig)
+#         d2l.display.clear_output(wait=True)
 
 class LorenzPeriodicRhoData(LorenzDataModule):
     def __init__(self, true_model, model_zoo, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
@@ -147,9 +233,8 @@ class LorenzPeriodicRhoData(LorenzDataModule):
         super().__init__()
         self.save_hyperparameters()
         n = num_train + num_val + num_discard + 1
-        self.data_model = true_model
-        self.model_zoo = model_zoo
-        data = self.data_model.run(n, num_discard)
+        self.model_zoo = [NumpyModel(model) for model in model_zoo]
+        data = true_model.run(n, num_discard)
         model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
         for j, model in enumerate(model_zoo):
             model_data[:,j] = model.run_array(data[:-1])
@@ -162,7 +247,61 @@ class LorenzPeriodicRhoData(LorenzDataModule):
         i = slice(0, self.num_train) if train else slice(self.num_train, None)
         return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
 
-class AdditiveAttention(d2l.Module):
+class TimeSeriesAttention(d2l.Module):
+    def __init__(self):
+        super().__init__()
+        self.board = d2l.ProgressBoard(yscale='log')
+
+    def validation_step_noplot(self, batch, model_zoo):
+        l, pred = self.validation_loss(self.predict(*batch[:-1], model_zoo), batch[-1])
+        return l, pred
+
+    def validation_loss(self, y_hat, y, cutoff = 1.0):
+        err = torch.mean((y_hat.squeeze(1) - y.squeeze(1))**2, 1)
+        vt_arr  = torch.arange(0, len(err))[err > cutoff]
+        if len(vt_arr) == 0:
+            return len(err), y_hat
+        else:
+            return max(vt_arr[0] - 1, 0), y_hat
+
+    def predict(self, queries_val, keys_val, values_val, model_zoo):
+        y_hat    = torch.zeros(*queries_val.size())
+        #print(y_hat.size())
+        queries_next, keys_next, values_next = queries_val[0].unsqueeze(0),\
+                                               keys_val[0].unsqueeze(0),\
+                                               values_val[0].unsqueeze(0)
+        y_hat[0] = self.forward(queries_next, keys_next, values_next)
+        for k in range(queries_val.size(0)-1):
+            keys_next    = values_next
+            queries_next = y_hat[k].unsqueeze(0)
+            #print(queries_next.size())
+            #print(queries_next.reshape(-1).size())
+            for j, model in enumerate(model_zoo):
+                values_next[:,j] = model.forward(queries_next.reshape(-1))
+            y_hat[k+1] = self.forward(queries_next,keys_next,values_next)
+
+        return y_hat
+
+    # def plot(self, key, value, train):
+    #     """Plot a point in animation."""
+    #     assert hasattr(self, 'trainer'), 'Trainer is not inited'
+    #     self.board.xlabel = 'epoch'
+    #     if train:
+    #         x = self.trainer.train_batch_idx / \
+    #             self.trainer.num_train_batches
+    #         n = self.trainer.num_train_batches / \
+    #             self.plot_train_per_epoch
+    #         self.board.draw(x, d2l.numpy(d2l.to(value, d2l.cpu())),
+    #                         ('train_' if train else 'val_') + key,
+    #                         every_n=int(n))
+    #     else:
+    #         x = np.arange(value.size(0))
+    #         n = self.trainer.num_val_batches / \
+    #             self.plot_valid_per_epoch
+    #         self.board.draw(x, d2l.numpy(d2l.to(value, d2l.cpu())),
+    #                         ('train_' if train else 'val_') + key,
+    #                         every_n=int(n))
+class AdditiveAttention(TimeSeriesAttention):
     """Additive attention."""
     def __init__(self, feature_size, num_hiddens, dropout, lr, sigma=0.01, **kwargs):
         super(AdditiveAttention, self).__init__(**kwargs)
@@ -172,7 +311,6 @@ class AdditiveAttention(d2l.Module):
         self.dropout = torch.nn.Dropout(dropout)
         self.sm = torch.nn.Softmax(dim = -1)
         self.lr = lr
-        self.board = d2l.ProgressBoard(yscale = 'log')
 
     def forward(self, queries, keys, values):
         W_queries, W_keys = torch.matmul(queries, self.W_q), torch.matmul(keys, self.W_k)
@@ -195,18 +333,45 @@ class AdditiveAttention(d2l.Module):
         l = (y_hat.reshape(-1) - y.reshape(-1)) **2 /2
         return l.mean()
 
-    def validation_step(self, batch):
-        l = self.validation_loss(self.predict(*batch[:-1]), batch[-1])
-        self.plot('loss', l, train=False)
-
-    def validation_loss(self, y_hat, y, cutoff = 1.0):
-        err = torch.mean((y_hat.squeeze(1) - y.squeeze(1))**2, 1)
-        vt_arr  = torch.arange(0, len(err))[err > cutoff]
-        if len(vt_arr) == 0:
-            return len(err)
-        else:
-            return max(vt_arr[0] - 1, 0)
-
     def configure_optimizers(self):
         return torch.optim.Adam([self.W_k, self.W_q, self.w_v], self.lr)
 
+class TrainerAttentionVT(d2l.Trainer):
+    def fit(self, model, data):
+        self.prepare_data(data)
+        self.prepare_model(model)
+        self.optim = model.configure_optimizers()
+        self.epoch = 0
+        self.train_batch_idx = 0
+        self.val_batch_idx = 0
+        for self.epoch in range(self.max_epochs):
+            self.fit_epoch(data.model_zoo)
+    def fit_epoch(self, model_zoo):
+        """Defined in :numref:`sec_linear_scratch`"""
+        self.model.train()
+        for batch in self.train_dataloader:
+            loss = self.model.training_step(self.prepare_batch(batch))
+            self.optim.zero_grad()
+            with torch.no_grad():
+                loss.backward()
+                if self.gradient_clip_val > 0:  # To be discussed later
+                    self.clip_gradients(self.gradient_clip_val, self.model)
+                self.optim.step()
+            self.train_batch_idx += 1
+        if self.val_dataloader is None:
+            return
+        self.model.eval()
+        self.mean_validation_loss(model_zoo)
+
+    def mean_validation_loss(self, model_zoo):
+        loss_sum = 0
+        for k, batch in enumerate(self.val_dataloader):
+            with torch.no_grad():
+                if k == 0:
+                    l, pred = self.model.validation_step_noplot(self.prepare_batch(batch), model_zoo)
+                else:
+                    l, tmp = self.model.validation_step_noplot(self.prepare_batch(batch), model_zoo)
+                loss_sum += l
+                self.val_batch_idx = k+1
+        # self.model.plot('vt = %0.2f' % loss_sum/self.val_batch_idx, pred, train=False)
+        self.model.plot('vt', (loss_sum / self.val_batch_idx), train=False)
