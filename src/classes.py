@@ -137,7 +137,7 @@ class NumpyModel(d2l.Module):
         return torch.from_numpy(self.numpy_model.state)
 
 class LorenzDataModule(d2l.DataModule):
-    def __init__(self, val_size = 64):
+    def __init__(self, batch_size = 32, val_size = 64):
         super().__init__()
         self.val_size = val_size
 
@@ -241,9 +241,9 @@ class LorenzPeriodicRhoData(LorenzDataModule):
         model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
         for j, model in enumerate(model_zoo):
             model_data[:,j] = model.run_array(data[:-1])
-        self.keys    = torch.from_numpy(model_data[:-1])
         self.values  = torch.from_numpy(model_data[1:])
         self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
+        self.keys    = torch.from_numpy(model_data[:-1]) - self.queries
         self.y       = torch.from_numpy(data[2:]).unsqueeze(1)
         self.keys    = self.keys
 
@@ -276,7 +276,7 @@ class TimeSeriesAttention(d2l.Module):
                                                values_val[0].unsqueeze(0)
         y_hat[0] = self.forward(queries_next, keys_next, values_next)
         for k in range(queries_val.size(0)-1):
-            keys_next    = values_next
+            keys_next    = values_next - y_hat[k].unsqueeze(0)
             queries_next = y_hat[k].unsqueeze(0)
             #print(queries_next.size())
             #print(queries_next.reshape(-1).size())
