@@ -259,6 +259,65 @@ class LorenzPeriodicRhoData(LorenzDataModule):
         i = slice(0, self.num_train) if train else slice(self.num_train, None)
         return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
 
+class LorenzPeriodicRhoData(LorenzDataModule):
+    def __init__(self, true_model, model_zoo, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
+                 batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
+                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64):
+        super().__init__()
+        self.save_hyperparameters()
+        n = num_train + num_val + 1
+        self.model_zoo = [NumpyModel(model) for model in model_zoo]
+        self.true_model = true_model
+        data, times = true_model.run(n, num_discard)
+        self.times = times
+        model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
+        for j, model in enumerate(model_zoo):
+            model_data[:,j] = model.run_array(data[:-1])
+        self.values  = torch.from_numpy(model_data[1:])
+        self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
+        self.keys    = torch.from_numpy(model_data[:-1]) - self.queries
+        self.y       = torch.from_numpy(data[2:]).unsqueeze(1)
+
+    def get_dataloader(self, train):
+        i = slice(0, self.num_train) if train else slice(self.num_train, None)
+        return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
+
+class LorenzPeriodicRhoTDEData(LorenzDataModule):
+    def __init__(self, true_model, model_zoo, time_delay = 1, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
+                 batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
+                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64):
+        super().__init__()
+        self.save_hyperparameters()
+        n = num_train + num_val + self.time_delay
+        self.model_zoo = [NumpyModel(model) for model in model_zoo]
+        self.true_model = true_model
+        data, times = true_model.run(n, num_discard)
+        self.times = times
+        model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
+        for j, model in enumerate(model_zoo):
+            model_data[:,j] = model.run_array(data[:-1])
+        self.values  = torch.from_numpy(model_data[self.time_delay:])
+        #self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
+        #self.keys    = torch.from_numpy(model_data[:-1]) - self.queries
+        self.y       = torch.from_numpy(data[1+self.time_delay:]).unsqueeze(1)
+        self.keys = torch.zeros(model_data.shape[0] - self.time_delay,
+                                   model_data.shape[1],
+                                   model_data.shape[2] * self.time_delay)
+        self.queries    = torch.zeros(data.shape[0] - self.time_delay - 1,
+                                1,
+                                data.shape[1] * self.time_delay)
+        for delay in range(self.time_delay):
+            self.queries[:,0,delay*data.shape[1]:(delay+1)*data.shape[1]] =\
+                torch.from_numpy(data[(self.time_delay-delay):(-1-delay)])
+            self.keys[:,:,delay*data.shape[1]:(delay+1)*data.shape[1]] = \
+                torch.from_numpy(model_data[(self.time_delay-delay-1):(-1-delay)])
+        self.keys = self.keys - self.queries
+
+
+    def get_dataloader(self, train):
+        i = slice(0, self.num_train) if train else slice(self.num_train, None)
+        return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
+
 class TeacherForcingData(LorenzDataModule):
     def __init__(self, data_in, trained_model, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
                  batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
