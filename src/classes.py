@@ -92,16 +92,18 @@ class LorenzModelPeriodicRho():
 
     def run(self, T, discard_len=0):
         model_output = np.zeros((T + discard_len + 1, 3))
+        times = np.zeros(T + discard_len + 1)
         model_output[0] = self.state
+        times[0] = self.time
         for i in range(T + discard_len):
-            model_output[i + 1] = self.forward()
+            model_output[i + 1], times[i+1] = self.forward()
 
-        return model_output[discard_len:]
+        return model_output[discard_len:], times[discard_len:]
 
     def forward(self):
         for i in range(self.int_steps):
             self.state, self.time = self.rk4()
-        return self.state
+        return self.state, self.time
 
     def rk4(self):
         # Fourth order Runge-Kutta integrator
@@ -132,9 +134,14 @@ class NumpyModel(d2l.Module):
 
     def forward(self, X):
         #print(X)
-        self.numpy_model.state = X.numpy()
+        self.numpy_model.state = X.detach().numpy()
         self.numpy_model.forward()
         return torch.from_numpy(self.numpy_model.state)
+
+    def run_array(self, X):
+        #print(X)
+        numpy_states = X.detach().numpy()
+        return torch.from_numpy(self.numpy_model.run_array(numpy_states))
 
 class LorenzDataModule(d2l.DataModule):
     def __init__(self, batch_size = 32, val_size = 64):
@@ -232,12 +239,14 @@ class ProgressBoardVT(d2l.ProgressBoard):
 class LorenzPeriodicRhoData(LorenzDataModule):
     def __init__(self, true_model, model_zoo, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
                  batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
-                 beta=8 / 3, ic=np.array([]), ic_seed=0):
+                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64):
         super().__init__()
         self.save_hyperparameters()
         n = num_train + num_val + 1
         self.model_zoo = [NumpyModel(model) for model in model_zoo]
-        data = true_model.run(n, num_discard)
+        self.true_model = true_model
+        data, times = true_model.run(n, num_discard)
+        self.times = times
         model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
         for j, model in enumerate(model_zoo):
             model_data[:,j] = model.run_array(data[:-1])
@@ -245,7 +254,28 @@ class LorenzPeriodicRhoData(LorenzDataModule):
         self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
         self.keys    = torch.from_numpy(model_data[:-1]) - self.queries
         self.y       = torch.from_numpy(data[2:]).unsqueeze(1)
-        self.keys    = self.keys
+
+    def get_dataloader(self, train):
+        i = slice(0, self.num_train) if train else slice(self.num_train, None)
+        return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
+
+class TeacherForcingData(LorenzDataModule):
+    def __init__(self, data_in, trained_model, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
+                 batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
+                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64):
+        super().__init__()
+        self.num_train = num_train
+        data = trained_model.forward(data_in.queries, data_in.keys, data_in.values)
+        self.times = data_in.times[1:]
+        self.model_zoo = data_in.model_zoo
+        model_data = torch.zeros(data.size(0)-1, len(self.model_zoo), data.size(2))
+        for j, model in enumerate(self.model_zoo):
+            model_data[:,j] = model.run_array(data[:-1].squeeze(1))
+        self.values  = model_data[1:]
+        self.queries = data[1:-1]
+        self.keys    = model_data[:-1] - self.queries
+        self.y       = data_in.y[2:]
+        self.save_hyperparameters()
 
     def get_dataloader(self, train):
         i = slice(0, self.num_train) if train else slice(self.num_train, None)
@@ -306,30 +336,30 @@ class TimeSeriesAttention(d2l.Module):
             self.board.draw(x, d2l.numpy(d2l.to(value, d2l.cpu())),
                             ('train_' if train else 'val_') + key, train = train,
                             every_n=int(n), label_val = label_val)
+
 class AdditiveAttention(TimeSeriesAttention):
     """Additive attention."""
     def __init__(self, feature_size, num_hiddens, dropout, lr, sigma=1, **kwargs):
         super(AdditiveAttention, self).__init__(**kwargs)
-        self.W_k = torch.normal(0, sigma, (feature_size, num_hiddens), requires_grad=True)
-        self.W_q = torch.normal(0, sigma, (feature_size, num_hiddens), requires_grad=True)
-        self.w_v = torch.normal(0, sigma, (num_hiddens, 1), requires_grad=True)
-        self.b   = torch.normal(0, sigma, (1, num_hiddens), requires_grad=True)
+        self.W_k = torch.nn.Linear(feature_size, num_hiddens, bias = True)
+        self.W_q = torch.nn.Linear(feature_size, num_hiddens, bias = False)
+        self.w_v = torch.nn.Linear(num_hiddens, 1)
         self.dropout = torch.nn.Dropout(dropout)
         self.sm = torch.nn.Softmax(dim = -1)
         self.lr = lr
 
     def forward(self, queries, keys, values):
-        W_queries, W_keys = torch.matmul(queries, self.W_q), torch.matmul(keys, self.W_k)
+        W_queries, W_keys = self.W_q(queries), self.W_k(keys)
         # After dimension expansion, shape of queries: (batch_size, no. of
         # queries, 1, num_hiddens) and shape of keys: (batch_size, 1, no. of
         # key-value pairs, num_hiddens). Sum them up with broadcasting
-        features_unsqueezed = W_queries.unsqueeze(2) + W_keys.unsqueeze(1) + self.b
+        features_unsqueezed = W_queries.unsqueeze(2) + W_keys.unsqueeze(1)
         features = torch.tanh(features_unsqueezed)
         # There is only one output of self.w_v, so we remove the last
         # one-dimensional entry from the shape. Shape of scores: (batch_size,
         # no. of queries, no. of key-value pairs)
         #self.attention_weights = torch.matmul(features, self.w_v).squeeze(-1)
-        scores = torch.matmul(features, self.w_v)
+        scores = self.w_v(features)
         self.attention_weights = self.sm(scores.squeeze(-1))
         # self.attention_weights = masked_softmax(scores, valid_lens)
         # Shape of values: (batch_size, no. of key-value pairs, value
@@ -341,7 +371,40 @@ class AdditiveAttention(TimeSeriesAttention):
         return l.mean()
 
     def configure_optimizers(self):
-        return torch.optim.Adam([self.W_k, self.W_q, self.b, self.w_v], self.lr)
+        return torch.optim.Adam(self.parameters(), self.lr)
+
+class IdiotAttention(TimeSeriesAttention):
+    """Additive attention."""
+    def __init__(self, feature_size, output_size, dropout, lr, **kwargs):
+        super(IdiotAttention, self).__init__(**kwargs)
+        self.W   = torch.nn.Linear(feature_size, output_size, bias = True)
+        self.dropout = torch.nn.Dropout(dropout)
+        self.lr = lr
+
+    def forward(self, queries, keys, values):
+        self.feature = torch.cat((queries.squeeze(1),
+                             (keys - queries).reshape(keys.size(0),-1),
+                             values.reshape(values.size(0),-1)), 1)
+        return self.W(self.feature).unsqueeze(1)
+
+    def loss(self, y_hat, y):
+        l = (y_hat.reshape(-1) - y.reshape(-1)) **2 /2
+        return l.mean()
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), self.lr)
+
+    def exact_solve(self, queries, keys, values, y):
+        with torch.no_grad():
+            _ = self.forward(queries, keys, values)
+            bias_feature = torch.cat((self.feature, torch.ones(self.feature.size(0),1)),1)
+            info_mat     = torch.mm(bias_feature.transpose(0,1), bias_feature).detach().numpy()
+            target_mat   = torch.mm(bias_feature.transpose(0,1), y.squeeze(1)).detach().numpy()
+            print(info_mat.shape)
+            print(target_mat.shape)
+            Wout         = np.linalg.solve(info_mat, target_mat)
+            self.W.weight= torch.nn.Parameter(torch.from_numpy(Wout[:-1].T))
+            self.W.bias  = torch.nn.Parameter(torch.from_numpy(Wout[-1]))
 
 class TestAttention(TimeSeriesAttention):
     """Additive attention."""
@@ -402,7 +465,7 @@ class TrainerAttentionVT(d2l.Trainer):
             loss = self.model.training_step(self.prepare_batch(batch))
             self.optim.zero_grad()
             with torch.no_grad():
-                loss.backward()
+                loss.backward(retain_graph=True)
                 if self.gradient_clip_val > 0:  # To be discussed later
                     self.clip_gradients(self.gradient_clip_val, self.model)
                 self.optim.step()
