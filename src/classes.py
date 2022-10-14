@@ -3,7 +3,9 @@ from numba import int32, float64
 from numba.experimental import jitclass
 from d2l import torch as d2l
 import torch
+from src.helpers import median_confidence
 import time
+from statistics import median
 
 spec = [
     ('tau', float64),
@@ -169,7 +171,7 @@ class ProgressBoardVT(d2l.ProgressBoard):
                  ylim=[None, None], xscale=['linear', 'linear'], yscale=['log', 'linear'],
                  ls=['-', '--', '-.', ':'], colors=['C0', 'C1', 'C2', 'C3'],
                  legend_loc = [None,None], use_jupyter = True,
-                 fig=None, axes=None, figsize=(10, 4), display=True):
+                 fig=None, axes=None, figsize=(12, 6), display=True):
         super().__init__()
         self.save_hyperparameters()
 
@@ -213,7 +215,7 @@ class ProgressBoardVT(d2l.ProgressBoard):
             plt_lines[v[1]].append(axes[v[1]].plot([p.x for p in v[0]], [p.y for p in v[0]],
                                           linestyle=ls, color=color)[0])
             if v[2]:
-                labels[v[1]].append(k + ' = %0.2e' % v[2])
+                labels[v[1]].append(k + r' = $%0.2f \pm %0.2f$' % (v[2][0], v[2][1]))
             else:
                 labels[v[1]].append(k)
         for idx in range(2):
@@ -355,7 +357,7 @@ class TimeSeriesAttention(d2l.Module):
         l, pred = self.validation_loss(self.predict(*batch[:-1], model_zoo), batch[-1])
         return l, pred
 
-    def validation_loss(self, y_hat, y, cutoff = 5.):
+    def validation_loss(self, y_hat, y, cutoff = 40.):
         err = torch.mean((y_hat.squeeze(1) - y.squeeze(1))**2, 1)
         vt_arr  = torch.arange(0, len(err))[err > cutoff]
         if len(vt_arr) == 0:
@@ -553,7 +555,7 @@ class TrainerAttentionVT(d2l.Trainer):
             self.fit_epoch()
             #toc = time.perf_counter()
             #print('Iter runtime: %0.3e sec.' % (toc - tic))
-            if self.epoch % 20 == 0:
+            if self.epoch % 25 == 0:
                 self.mean_validation_loss(data.model_zoo)
     def fit_epoch(self):
         """Defined in :numref:`sec_linear_scratch`"""
@@ -572,7 +574,7 @@ class TrainerAttentionVT(d2l.Trainer):
         self.model.eval()
 
     def mean_validation_loss(self, model_zoo):
-        loss_sum = 0
+        loss_all = []
         self.model = self.model.to("cpu")
         for k, batch in enumerate(self.val_dataloader):
             with torch.no_grad():
@@ -580,11 +582,11 @@ class TrainerAttentionVT(d2l.Trainer):
                     l, pred = self.model.validation_step_noplot(self.prepare_batch_val(batch), model_zoo)
                 else:
                     l, tmp = self.model.validation_step_noplot(self.prepare_batch_val(batch), model_zoo)
-                loss_sum += l
+                loss_all.append(l)
                 self.val_batch_idx = k+1
             if self.epoch == 0 and k == 0:
                 self.model.plot('true', self.prepare_batch_val(batch)[-1][:,0,0], train = False)
-        vt = loss_sum / self.val_batch_idx
-        self.model.plot('mean_vt', pred[:,0,0], train=False, label_val = vt)
+        vt, confidence = median_confidence(loss_all)
+        self.model.plot('median_vt', pred[:,0,0], train=False, label_val = (vt, confidence))
         self.model = self.model.to(self.model.device)
         # self.model.plot('vt', (loss_sum / self.val_batch_idx), train=False)
