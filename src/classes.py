@@ -3,6 +3,9 @@ from numba import int32, float64
 from numba.experimental import jitclass
 from d2l import torch as d2l
 import torch
+from src.helpers import median_confidence
+import time
+from statistics import median
 
 spec = [
     ('tau', float64),
@@ -126,22 +129,23 @@ class LorenzModelPeriodicRho():
         self.rho = 10 * np.sin(2 * np.pi * t / self.period + 1.5 * np.pi) + 38
 
 class NumpyModel(d2l.Module):
-    def __init__(self, numpy_model):
+    def __init__(self, numpy_model,dtype):
         super().__init__()
         if not hasattr(numpy_model, 'state'):
             raise ValueError
         self.numpy_model = numpy_model
+        self.dtype = dtype
 
     def forward(self, X):
         #print(X)
-        self.numpy_model.state = X.detach().numpy()
+        self.numpy_model.state = np.double(X.detach().numpy())
         self.numpy_model.forward()
-        return torch.from_numpy(self.numpy_model.state)
+        return torch.from_numpy(self.numpy_model.state).type(self.dtype)
 
     def run_array(self, X):
         #print(X)
-        numpy_states = X.detach().numpy()
-        return torch.from_numpy(self.numpy_model.run_array(numpy_states))
+        numpy_states = np.double(X.detach().numpy())
+        return torch.from_numpy(self.numpy_model.run_array(numpy_states)).type(self.dtype)
 
 class LorenzDataModule(d2l.DataModule):
     def __init__(self, batch_size = 32, val_size = 64):
@@ -167,7 +171,7 @@ class ProgressBoardVT(d2l.ProgressBoard):
                  ylim=[None, None], xscale=['linear', 'linear'], yscale=['log', 'linear'],
                  ls=['-', '--', '-.', ':'], colors=['C0', 'C1', 'C2', 'C3'],
                  legend_loc = [None,None], use_jupyter = True,
-                 fig=None, axes=None, figsize=(10, 4), display=True):
+                 fig=None, axes=None, figsize=(12, 6), display=True):
         super().__init__()
         self.save_hyperparameters()
 
@@ -211,7 +215,7 @@ class ProgressBoardVT(d2l.ProgressBoard):
             plt_lines[v[1]].append(axes[v[1]].plot([p.x for p in v[0]], [p.y for p in v[0]],
                                           linestyle=ls, color=color)[0])
             if v[2]:
-                labels[v[1]].append(k + ' = %0.2e' % v[2])
+                labels[v[1]].append(k + r' = $%0.2f \pm %0.2f$' % (v[2][0], v[2][1]))
             else:
                 labels[v[1]].append(k)
         for idx in range(2):
@@ -259,6 +263,69 @@ class LorenzPeriodicRhoData(LorenzDataModule):
         i = slice(0, self.num_train) if train else slice(self.num_train, None)
         return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
 
+class LorenzPeriodicRhoData(LorenzDataModule):
+    def __init__(self, true_model, model_zoo, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
+                 batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
+                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64):
+        super().__init__()
+        self.save_hyperparameters()
+        n = num_train + num_val + 1
+        self.model_zoo = [NumpyModel(model) for model in model_zoo]
+        self.true_model = true_model
+        data, times = true_model.run(n, num_discard)
+        self.times = times
+        model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
+        for j, model in enumerate(model_zoo):
+            model_data[:,j] = model.run_array(data[:-1])
+        self.values  = torch.from_numpy(model_data[1:])
+        self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
+        self.keys    = torch.from_numpy(model_data[:-1]) - self.queries
+        self.y       = torch.from_numpy(data[2:]).unsqueeze(1)
+
+    def get_dataloader(self, train):
+        i = slice(0, self.num_train) if train else slice(self.num_train, None)
+        return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
+
+class LorenzPeriodicRhoTDEData(LorenzDataModule):
+    def __init__(self, true_model, model_zoo, time_delay = 1, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
+                 batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
+                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64, dtype = torch.float64):
+        super().__init__()
+        self.save_hyperparameters()
+        n = num_train + num_val + self.time_delay
+        self.model_zoo = [NumpyModel(model, dtype) for model in model_zoo]
+        self.true_model = true_model
+        data, times = true_model.run(n, num_discard)
+        self.times = times
+        model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
+        for j, model in enumerate(model_zoo):
+            model_data[:,j] = model.run_array(data[:-1])
+        self.values  = torch.from_numpy(model_data[self.time_delay:])
+        #self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
+        #self.keys    = torch.from_numpy(model_data[:-1]) - self.queries
+        self.y       = torch.from_numpy(data[1+self.time_delay:]).unsqueeze(1)
+        self.keys = torch.zeros(model_data.shape[0] - self.time_delay,
+                                   model_data.shape[1],
+                                   model_data.shape[2] * self.time_delay)
+        self.queries    = torch.zeros(data.shape[0] - self.time_delay - 1,
+                                1,
+                                data.shape[1] * self.time_delay)
+        for delay in range(self.time_delay):
+            self.queries[:,0,delay*data.shape[1]:(delay+1)*data.shape[1]] =\
+                torch.from_numpy(data[(self.time_delay-delay):(-1-delay)])
+            self.keys[:,:,delay*data.shape[1]:(delay+1)*data.shape[1]] = \
+                torch.from_numpy(model_data[(self.time_delay-delay-1):(-1-delay)])
+        self.keys = self.keys - self.queries
+        self.values  = self.values.type(dtype)
+        self.keys    = self.keys.type(dtype)
+        self.queries = self.queries.type(dtype)
+        self.y       = self.y.type(dtype)
+
+
+    def get_dataloader(self, train):
+        i = slice(0, self.num_train) if train else slice(self.num_train, None)
+        return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
+
 class TeacherForcingData(LorenzDataModule):
     def __init__(self, data_in, trained_model, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
                  batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
@@ -290,7 +357,7 @@ class TimeSeriesAttention(d2l.Module):
         l, pred = self.validation_loss(self.predict(*batch[:-1], model_zoo), batch[-1])
         return l, pred
 
-    def validation_loss(self, y_hat, y, cutoff = 5.):
+    def validation_loss(self, y_hat, y, cutoff = 40.):
         err = torch.mean((y_hat.squeeze(1) - y.squeeze(1))**2, 1)
         vt_arr  = torch.arange(0, len(err))[err > cutoff]
         if len(vt_arr) == 0:
@@ -299,20 +366,36 @@ class TimeSeriesAttention(d2l.Module):
             return max(vt_arr[0] - 1, 0), y_hat
 
     def predict(self, queries_val, keys_val, values_val, model_zoo):
-        y_hat    = torch.zeros(*queries_val.size())
+        y_hat    = torch.zeros(queries_val.size(0),
+                               queries_val.size(1),
+                               values_val.size(2))
         #print(y_hat.size())
+        num_features = values_val.size(-1)
+        feature_size = keys_val.size(-1)
         queries_next, keys_next, values_next = queries_val[0].unsqueeze(0),\
                                                keys_val[0].unsqueeze(0),\
                                                values_val[0].unsqueeze(0)
         y_hat[0] = self.forward(queries_next, keys_next, values_next)
-        for k in range(queries_val.size(0)-1):
-            keys_next    = values_next - y_hat[k].unsqueeze(0)
-            queries_next = y_hat[k].unsqueeze(0)
-            #print(queries_next.size())
-            #print(queries_next.reshape(-1).size())
-            for j, model in enumerate(model_zoo):
-                values_next[:,j] = model.forward(queries_next.reshape(-1))
-            y_hat[k+1] = self.forward(queries_next,keys_next,values_next)
+        if feature_size > num_features:
+            for k in range(queries_val.size(0)-1):
+                keys_next[:,:,num_features:]    = keys_next[:,:,:-num_features].clone()
+                queries_next[:,:,num_features:] = queries_next[:,:,:-num_features].clone()
+                keys_next[:,:,:num_features]    = values_next - y_hat[k].unsqueeze(0)
+                queries_next[:,:,:num_features] = y_hat[k].unsqueeze(0)
+                #print(queries_next.size())
+                #print(queries_next.reshape(-1).size())
+                for j, model in enumerate(model_zoo):
+                    values_next[:,j] = model.forward(queries_next[:,:,:num_features].reshape(-1))
+                y_hat[k+1] = self.forward(queries_next,keys_next,values_next)
+        else:
+            for k in range(queries_val.size(0)-1):
+                keys_next = values_next - y_hat[k].unsqueeze(0)
+                queries_next = y_hat[k].unsqueeze(0)
+                # print(queries_next.size())
+                # print(queries_next.reshape(-1).size())
+                for j, model in enumerate(model_zoo):
+                    values_next[:, j] = model.forward(queries_next.reshape(-1))
+                y_hat[k + 1] = self.forward(queries_next, keys_next, values_next)
 
         return y_hat
 
@@ -340,7 +423,7 @@ class TimeSeriesAttention(d2l.Module):
 
 class AdditiveAttention(TimeSeriesAttention):
     """Additive attention."""
-    def __init__(self, feature_size, num_hiddens, dropout, lr, sigma=1, **kwargs):
+    def __init__(self, feature_size, num_hiddens, dropout, lr, l1_reg = 0.001, **kwargs):
         super(AdditiveAttention, self).__init__(**kwargs)
         self.W_k = torch.nn.Linear(feature_size, num_hiddens, bias = True)
         self.W_q = torch.nn.Linear(feature_size, num_hiddens, bias = False)
@@ -348,6 +431,8 @@ class AdditiveAttention(TimeSeriesAttention):
         self.dropout = torch.nn.Dropout(dropout)
         self.sm = torch.nn.Softmax(dim = -1)
         self.lr = lr
+        self.l1_reg = l1_reg
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def forward(self, queries, keys, values):
         W_queries, W_keys = self.W_q(queries), self.W_k(keys)
@@ -368,7 +453,8 @@ class AdditiveAttention(TimeSeriesAttention):
         return torch.bmm(self.dropout(self.attention_weights), values)
 
     def loss(self, y_hat, y):
-        l = (y_hat.reshape(-1) - y.reshape(-1)) **2 /2
+        l = (y_hat.reshape(-1) - y.reshape(-1)) **2 /2 + \
+            self.l1_reg * sum(torch.linalg.norm(p, 1) for p in self.parameters())
         return l.mean()
 
     def configure_optimizers(self):
@@ -479,7 +565,15 @@ class TrainerAttentionVT(d2l.Trainer):
         model.trainer = self
         model.board.xlim[0] = [0, self.max_epochs]
         model.board.xlim[1] = [0,self.val_size]
-        self.model = model
+        self.model = model.to(model.device)
+
+    def prepare_batch(self, batch):
+        """Defined in :numref:`sec_linear_scratch`"""
+        return tuple([batch_elem.to(self.model.device) for batch_elem in batch])
+
+    def prepare_batch_val(self, batch):
+        """Defined in :numref:`sec_linear_scratch`"""
+        return batch
     def fit(self, model, data):
         self.val_size = data.val_size
         self.prepare_data(data)
@@ -490,8 +584,14 @@ class TrainerAttentionVT(d2l.Trainer):
         self.val_batch_idx = 0
         for self.epoch in range(self.max_epochs):
             self.fit_epoch(data.model_zoo)
-
     def fit_epoch(self, model_zoo):
+            #tic = time.perf_counter()
+            self.fit_epoch()
+            #toc = time.perf_counter()
+            #print('Iter runtime: %0.3e sec.' % (toc - tic))
+            if self.epoch % 25 == 0:
+                self.mean_validation_loss(data.model_zoo)
+    def fit_epoch(self):
         """Defined in :numref:`sec_linear_scratch`"""
         self.model.train()
         for batch in self.train_dataloader:
@@ -506,20 +606,21 @@ class TrainerAttentionVT(d2l.Trainer):
         if self.val_dataloader is None:
             return
         self.model.eval()
-        self.mean_validation_loss(model_zoo)
 
     def mean_validation_loss(self, model_zoo):
-        loss_sum = 0
+        loss_all = []
+        self.model = self.model.to("cpu")
         for k, batch in enumerate(self.val_dataloader):
             with torch.no_grad():
                 if k == 0:
-                    l, pred = self.model.validation_step_noplot(self.prepare_batch(batch), model_zoo)
+                    l, pred = self.model.validation_step_noplot(self.prepare_batch_val(batch), model_zoo)
                 else:
-                    l, tmp = self.model.validation_step_noplot(self.prepare_batch(batch), model_zoo)
-                loss_sum += l
+                    l, tmp = self.model.validation_step_noplot(self.prepare_batch_val(batch), model_zoo)
+                loss_all.append(l)
                 self.val_batch_idx = k+1
             if self.epoch == 0 and k == 0:
-                self.model.plot('true', self.prepare_batch(batch)[-1][:,0,0], train = False)
-        vt = loss_sum / self.val_batch_idx
-        self.model.plot('mean_vt', pred[:,0,0], train=False, label_val = vt)
+                self.model.plot('true', self.prepare_batch_val(batch)[-1][:,0,0], train = False)
+        vt, confidence = median_confidence(loss_all)
+        self.model.plot('median_vt', pred[:,0,0], train=False, label_val = (vt, confidence))
+        self.model = self.model.to(self.model.device)
         # self.model.plot('vt', (loss_sum / self.val_batch_idx), train=False)
