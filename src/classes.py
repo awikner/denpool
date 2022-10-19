@@ -124,6 +124,8 @@ class LorenzModelPeriodicRho():
         return np.array([self.sigma * (- x[0] + x[1]),
                          self.rho * x[0] - x[1] - x[0] * x[2],
                          x[0] * x[1] - self.beta * x[2]])
+    def rhofun(self, t):
+        self.rho = 10 * np.sin(2 * np.pi * t / self.period + 1.5 * np.pi) + 38
 
 class NumpyModel(d2l.Module):
     def __init__(self, numpy_model,dtype):
@@ -626,12 +628,12 @@ class TrainerAttentionVT(d2l.Trainer):
             self.fit_epoch(data.model_zoo)
     def fit_epoch(self, model_zoo):
             #tic = time.perf_counter()
-            self.fit_epoch()
+            self.fit_epoch_base()
             #toc = time.perf_counter()
             #print('Iter runtime: %0.3e sec.' % (toc - tic))
             if self.epoch % 25 == 0:
-                self.mean_validation_loss(data.model_zoo)
-    def fit_epoch(self):
+                self.mean_validation_loss(model_zoo)
+    def fit_epoch_base(self):
         """Defined in :numref:`sec_linear_scratch`"""
         self.model.train()
         for batch in self.train_dataloader:
