@@ -400,6 +400,7 @@ class TimeSeriesAttention(d2l.Module):
 
         return y_hat
 
+
     def plot(self, key, value, train, label_val = None):
         """Plot a point in animation."""
         assert hasattr(self, 'trainer'), 'Trainer is not inited'
@@ -532,6 +533,37 @@ class IdiotAttention(TimeSeriesAttention):
             self.W.weight= torch.nn.Parameter(torch.from_numpy(Wout[:-1].T))
             self.W.bias  = torch.nn.Parameter(torch.from_numpy(Wout[-1]))
 
+class DotProductAttention(TimeSeriesAttention):
+    """Scaled dot product attention."""
+    def __init__(self, feature_size, dropout, lr, num_hidden=None, **kwargs):
+        super(DotProductAttention, self).__init__(**kwargs)
+        self.dropout = torch.nn.Dropout(dropout)
+        self.lr = lr
+        self.sm = torch.nn.Softmax(dim=-1)
+        self.num_hidden = num_hidden
+        if self.num_hidden is not None:
+            self.W_q = torch.nn.Linear(feature_size, num_hidden, bias=True)
+            self.W_k = torch.nn.Linear(feature_size, num_hidden, bias=True)
+
+    # Shape of queries: (batch_size, no. queries, feature_size)
+    # Shape of keys: (batch_size, no. key-value pairs, feature_size)
+    # Shape of values: (batch_size, no. key-value pairs, feature_size)
+    def forward(self, queries, keys, values):
+        # Swap last two dimensions of keys
+        d = queries.shape[-1]
+        if self.num_hidden:
+            queries, keys = self.W_q(queries), self.W_k(keys)
+        scores = torch.bmm(queries, keys.transpose(1, 2)) / np.sqrt(d)
+        self.attention_weights = self.sm(scores)
+        return torch.bmm(self.dropout(self.attention_weights), values)
+
+    def loss(self, y_hat, y):
+        l = (y_hat.reshape(-1) - y.reshape(-1))**2 / 2
+        return l.mean()
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.lr)
+
 class TestAttention(TimeSeriesAttention):
     """Additive attention."""
     def __init__(self, feature_size, num_hiddens, dropout, lr, sigma=0.01, **kwargs):
@@ -591,6 +623,8 @@ class TrainerAttentionVT(d2l.Trainer):
         self.train_batch_idx = 0
         self.val_batch_idx = 0
         for self.epoch in range(self.max_epochs):
+            self.fit_epoch(data.model_zoo)
+    def fit_epoch(self, model_zoo):
             #tic = time.perf_counter()
             self.fit_epoch()
             #toc = time.perf_counter()
