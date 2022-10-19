@@ -125,9 +125,6 @@ class LorenzModelPeriodicRho():
                          self.rho * x[0] - x[1] - x[0] * x[2],
                          x[0] * x[1] - self.beta * x[2]])
 
-    def rhofun(self, t):
-        self.rho = 10 * np.sin(2 * np.pi * t / self.period + 1.5 * np.pi) + 38
-
 class NumpyModel(d2l.Module):
     def __init__(self, numpy_model,dtype):
         super().__init__()
@@ -146,6 +143,10 @@ class NumpyModel(d2l.Module):
         #print(X)
         numpy_states = np.double(X.detach().numpy())
         return torch.from_numpy(self.numpy_model.run_array(numpy_states)).type(self.dtype)
+
+    def run(self, x, T):
+        self.numpy_model.state = np.double(x.detach().numpy())
+        return torch.from_numpy(self.numpy_model.run(T)).type(self.dtype)
 
 class LorenzDataModule(d2l.DataModule):
     def __init__(self, batch_size = 32, val_size = 64):
@@ -296,7 +297,7 @@ class LorenzPeriodicRhoTDEData(LorenzDataModule):
         self.model_zoo = [NumpyModel(model, dtype) for model in model_zoo]
         self.true_model = true_model
         data, times = true_model.run(n, num_discard)
-        self.times = times
+        self.times = times[self.time_delay:-1]
         model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
         for j, model in enumerate(model_zoo):
             model_data[:,j] = model.run_array(data[:-1])
@@ -459,6 +460,45 @@ class AdditiveAttention(TimeSeriesAttention):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), self.lr)
 
+class InitAttention(TimeSeriesAttention):
+    """Additive attention."""
+    def __init__(self, feature_size, num_hiddens, dropout, lr, l1_reg = 0.001, **kwargs):
+        super(InitAttention, self).__init__(**kwargs)
+        self.W_k = torch.nn.Linear(feature_size, num_hiddens, bias = True)
+        self.W_q = torch.nn.Linear(feature_size, num_hiddens, bias = False)
+        self.w_v = torch.nn.Linear(num_hiddens, 1)
+        self.dropout = torch.nn.Dropout(dropout)
+        self.sm = torch.nn.Softmax(dim = -1)
+        self.lr = lr
+        self.l1_reg = l1_reg
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def forward(self, queries, keys, values):
+        W_queries, W_keys = self.W_q(queries), self.W_k(keys)
+        # After dimension expansion, shape of queries: (batch_size, no. of
+        # queries, 1, num_hiddens) and shape of keys: (batch_size, 1, no. of
+        # key-value pairs, num_hiddens). Sum them up with broadcasting
+        features_unsqueezed = W_queries.unsqueeze(2) + W_keys.unsqueeze(1)
+        features = torch.tanh(features_unsqueezed)
+        # There is only one output of self.w_v, so we remove the last
+        # one-dimensional entry from the shape. Shape of scores: (batch_size,
+        # no. of queries, no. of key-value pairs)
+        #self.attention_weights = torch.matmul(features, self.w_v).squeeze(-1)
+        scores = self.w_v(features)
+        self.attention_weights = self.sm(scores.squeeze(-1))
+        # self.attention_weights = masked_softmax(scores, valid_lens)
+        # Shape of values: (batch_size, no. of key-value pairs, value
+        # dimension)
+        return torch.bmm(self.dropout(self.attention_weights), values)
+
+    def loss(self, y_hat, y):
+        l = (y_hat.reshape(-1) - y.reshape(-1)) **2 /2 + \
+            self.l1_reg * sum(torch.linalg.norm(p, 1) for p in self.parameters())
+        return l.mean()
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), self.lr)
+
 class IdiotAttention(TimeSeriesAttention):
     """Additive attention."""
     def __init__(self, feature_size, output_size, dropout, lr, **kwargs):
@@ -469,7 +509,7 @@ class IdiotAttention(TimeSeriesAttention):
 
     def forward(self, queries, keys, values):
         self.feature = torch.cat((queries.squeeze(1),
-                             (keys - queries).reshape(keys.size(0),-1),
+                             keys.reshape(keys.size(0),-1),
                              values.reshape(values.size(0),-1)), 1)
         return self.W(self.feature).unsqueeze(1)
 
