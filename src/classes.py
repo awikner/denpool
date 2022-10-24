@@ -511,9 +511,7 @@ class IdiotAttention(TimeSeriesAttention):
         self.lr = lr
 
     def forward(self, queries, keys, values):
-        self.feature = torch.cat((queries.squeeze(1),
-                             keys.reshape(keys.size(0),-1),
-                             values.reshape(values.size(0),-1)), 1)
+        self.feature = values.reshape(values.size(0),-1)
         return self.W(self.feature).unsqueeze(1)
 
     def loss(self, y_hat, y):
