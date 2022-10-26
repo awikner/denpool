@@ -4,6 +4,7 @@ from numba.experimental import jitclass
 from d2l import torch as d2l
 import torch
 from src.helpers import median_confidence
+from scipy.optimize import lsq_linear, minimize, LinearConstraint
 import time
 from statistics import median
 
@@ -329,6 +330,45 @@ class LorenzPeriodicRhoTDEData(LorenzDataModule):
         i = slice(0, self.num_train) if train else slice(self.num_train, None)
         return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
 
+class LorenzPeriodicRhoTDENoDiffData(LorenzDataModule):
+    def __init__(self, true_model, model_zoo, time_delay = 1, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
+                 batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
+                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64, dtype = torch.float64):
+        super().__init__()
+        self.save_hyperparameters()
+        n = num_train + num_val + self.time_delay
+        self.model_zoo = [NumpyModel(model, dtype) for model in model_zoo]
+        self.true_model = true_model
+        data, times = true_model.run(n, num_discard)
+        self.times = times[self.time_delay:-1]
+        model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
+        for j, model in enumerate(model_zoo):
+            model_data[:,j] = model.run_array(data[:-1])
+        self.values  = torch.from_numpy(model_data[self.time_delay:])
+        #self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
+        #self.keys    = torch.from_numpy(model_data[:-1]) - self.queries
+        self.y       = torch.from_numpy(data[1+self.time_delay:]).unsqueeze(1)
+        self.keys = torch.zeros(model_data.shape[0] - self.time_delay,
+                                   model_data.shape[1],
+                                   model_data.shape[2] * self.time_delay)
+        self.queries    = torch.zeros(data.shape[0] - self.time_delay - 1,
+                                1,
+                                data.shape[1] * self.time_delay)
+        for delay in range(self.time_delay):
+            self.queries[:,0,delay*data.shape[1]:(delay+1)*data.shape[1]] =\
+                torch.from_numpy(data[(self.time_delay-delay):(-1-delay)])
+            self.keys[:,:,delay*data.shape[1]:(delay+1)*data.shape[1]] = \
+                torch.from_numpy(model_data[(self.time_delay-delay-1):(-1-delay)])
+        self.values  = self.values.type(dtype)
+        self.keys    = self.keys.type(dtype)
+        self.queries = self.queries.type(dtype)
+        self.y       = self.y.type(dtype)
+
+
+    def get_dataloader(self, train):
+        i = slice(0, self.num_train) if train else slice(self.num_train, None)
+        return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
+
 class TeacherForcingData(LorenzDataModule):
     def __init__(self, data_in, trained_model, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
                  batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
@@ -489,6 +529,7 @@ class InitAttention(TimeSeriesAttention):
         #self.attention_weights = torch.matmul(features, self.w_v).squeeze(-1)
         scores = self.w_v(features)
         self.attention_weights = self.sm(scores.squeeze(-1))
+
         # self.attention_weights = masked_softmax(scores, valid_lens)
         # Shape of values: (batch_size, no. of key-value pairs, value
         # dimension)
@@ -532,6 +573,65 @@ class IdiotAttention(TimeSeriesAttention):
             Wout         = np.linalg.solve(info_mat, target_mat)
             self.W.weight= torch.nn.Parameter(torch.from_numpy(Wout[:-1].T))
             self.W.bias  = torch.nn.Parameter(torch.from_numpy(Wout[-1]))
+
+class LLRAttention(TimeSeriesAttention):
+    """Additive attention."""
+    def __init__(self, feature_size, output_size, **kwargs):
+        super(LLRAttention, self).__init__(**kwargs)
+        self.W   = torch.nn.Linear(feature_size, 1, bias = False)
+        self.output_size = output_size
+
+    def forward(self, queries, keys, values):
+        scale_mat = torch.mm(torch.ones(values.size(0),1), self.W.weight)
+        #print(scale_mat.unsqueeze(1).size())
+        #print(values.size())
+        return torch.bmm(scale_mat.unsqueeze(1), values)
+
+    def loss(self, y_hat, y):
+        l = (y_hat.reshape(-1) - y.reshape(-1)) **2 /2
+        return l.mean()
+
+    def configure_optimizers(self):
+        return torch.optim.SGD(self.parameters(), 0.)
+
+    def predict(self, queries_val, keys_val, values_val, model_zoo):
+        y_hat = torch.zeros(queries_val.size(0),
+                            queries_val.size(1),
+                            values_val.size(2))
+        self.get_weights(queries_val, keys_val)
+        queries_next, keys_next, values_next = queries_val[0].unsqueeze(0), \
+                                               keys_val[0].unsqueeze(0), \
+                                               values_val[0].unsqueeze(0)
+        y_hat[0] = self.forward(queries_next, keys_next, values_next)
+        for k in range(queries_val.size(0) - 1):
+            keys_next = values_next
+            queries_next = y_hat[k].unsqueeze(0)
+            # print(queries_next.size())
+            # print(queries_next.reshape(-1).size())
+            for j, model in enumerate(model_zoo):
+                values_next[:, j] = model.forward(queries_next.reshape(-1))
+            y_hat[k + 1] = self.forward(queries_next, keys_next, values_next)
+
+        return y_hat
+
+    def get_weights(self, queries, keys):
+        with torch.no_grad():
+            info_mat     = np.double(torch.mm(keys[0], keys[0].transpose(0,1)).detach().numpy())
+            target_mat   = np.double(torch.mm(queries[0], keys[0].transpose(0,1)).detach().numpy())
+            #print(self.W.weight)
+            #print(info_mat.shape)
+            #print(target_mat.shape)
+            prob_constr = LinearConstraint(np.ones(info_mat.shape[0]), 1., 1.)
+            hessp = lambda x, p: np.zeros(x.size)
+            min_fun = lambda x: np.mean((x @ info_mat - target_mat)**2.0)
+            Wout         = minimize(min_fun, np.ones((1, info_mat.shape[0]))/info_mat.shape[0],
+                                      method = 'trust-constr', hessp = hessp,
+                                      bounds = [(0,1)]*info_mat.shape[0],
+                                      constraints = prob_constr)
+            #print(Wout.x)
+            #Wout         = target_mat @ np.linalg.pinv(info_mat)
+            self.W.weight= torch.nn.Parameter(torch.from_numpy(Wout.x.reshape(1,-1)).type(torch.float32))
+            #print(self.W.weight)
 
 class DotProductAttention(TimeSeriesAttention):
     """Scaled dot product attention."""
