@@ -1,5 +1,10 @@
 from statistics import median
 from math import ceil, sqrt
+import pandas as pd
+
+def df_to_nprec(df, var_name, value_name):
+    return (pd.melt(df, var_name = var_name, value_name = value_name).set_index(var_name).to_records())
+
 
 def median_confidence(data, q = 0.5, z = 1.96):
     data.sort()
