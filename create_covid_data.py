@@ -1,29 +1,36 @@
-#!/home/awikner1/miniconda3/envs/denpool/bin/python
-#SBATCH -t 60
+#!/home/awikner1/miniconda3/envs/denpool/bin/python -u
+#SBATCH -t 240
 #SBATCH -n 1
 #SBATCH -c 1
 import h5py
 import pandas as pd
 import numpy as np
-import os, glob
+import os, glob, sys
 from tqdm import tqdm
+import getopt
 
-#file_count = 0
-data_path = 'C:\\Users\\user\\Documents\\covid19-forecast-hub\\data-processed'
-#for root_dir, cur_dir, files in os.walk(data_path):
-#    for data_file in files:
-#        if '.csv' in data_file or ('metadata' in data_file and '.txt' in data_file):
-#            file_count += 1
-#print('Total number of files to read: %d' % file_count)
+def main(argv):
+    try:
+        opts, args = getopt.getopt(argv, "G:P:S:",[])
+    except getopt.GetoptError:
+        print('Error: Some options not recognized')
+        sys.exit(2)
+    for opt, arg in opts:
+        if opt == '-G':
+            group_name = str(arg)
+            print('Group Name: %s' % group_name)
+        elif opt == '-P':
+            group_path = str(arg)
+            print('Group Path: %s' % group_path)
+        elif opt == '-S':
+            save_path = str(arg)
+            print('Save Path: %s' % save_path)
 
-if os.path.exists('covid_prediction_data.hdf5'):
-    os.remove('covid_prediction_data.hdf5')
-with h5py.File('covid_prediction_data.hdf5','a') as f:
-    # Get all groups and paths to data
-    group_names = next(os.walk(data_path))[1]
-    group_paths = [os.path.join(data_path, group_name) for group_name in group_names]
-    for iter, (group_name, group_path) in enumerate(zip(group_names, group_paths)):
-        print('Group %d/%d: %s' % (iter+1, len(group_names), group_name))
+    file_path = os.path.join(save_path, 'covid_prediction_data_%s.hdf5' % group_name)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+    with h5py.File(file_path,'a') as f:
+        # Get all groups and paths to data
         # Create group in file
         group = f.create_group(group_name)
         # Load metadata and save as group attributes
@@ -118,5 +125,5 @@ with h5py.File('covid_prediction_data.hdf5','a') as f:
                         target_grp.create_dataset('point', data = point_arr)
                         pbar.update(1)
 
-
-                            
+if __name__ == "__main__":
+    main(sys.argv[1:])
