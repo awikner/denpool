@@ -503,6 +503,45 @@ class AdditiveAttention(TimeSeriesAttention):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), self.lr)
 
+class NoAttention(TimeSeriesAttention):
+    """Additive attention."""
+    def __init__(self, feature_size, num_hiddens, output_size, dropout, lr, l1_reg = 0.001, **kwargs):
+        super(NoAttention, self).__init__(**kwargs)
+        #self.W_k = torch.nn.Linear(feature_size, num_hiddens, bias = True)
+        self.W_q = torch.nn.Linear(feature_size, num_hiddens, bias = True)
+        self.w_v = torch.nn.Linear(num_hiddens, output_size)
+        self.dropout = torch.nn.Dropout(dropout)
+        #self.sm = torch.nn.Softmax(dim = -1)
+        self.lr = lr
+        self.l1_reg = l1_reg
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def forward(self, queries, keys, values):
+        W_queries = self.W_q(queries)
+        # After dimension expansion, shape of queries: (batch_size, no. of
+        # queries, 1, num_hiddens) and shape of keys: (batch_size, 1, no. of
+        # key-value pairs, num_hiddens). Sum them up with broadcasting
+        #features_unsqueezed = W_queries.unsqueeze(2)
+        features = torch.tanh(W_queries)
+        # There is only one output of self.w_v, so we remove the last
+        # one-dimensional entry from the shape. Shape of scores: (batch_size,
+        # no. of queries, no. of key-value pairs)
+        #self.attention_weights = torch.matmul(features, self.w_v).squeeze(-1)
+        scores = self.w_v(features)
+        #self.attention_weights = self.sm(scores.squeeze(-1))
+        # self.attention_weights = masked_softmax(scores, valid_lens)
+        # Shape of values: (batch_size, no. of key-value pairs, value
+        # dimension)
+        return scores
+
+    def loss(self, y_hat, y):
+        l = (y_hat.reshape(-1) - y.reshape(-1)) **2 /2 + \
+            self.l1_reg * sum(torch.linalg.norm(p, 1) for p in self.parameters())
+        return l.mean()
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), self.lr)
+
 class InitAttention(TimeSeriesAttention):
     """Additive attention."""
     def __init__(self, feature_size, num_hiddens, dropout, lr, l1_reg = 0.001, **kwargs):
