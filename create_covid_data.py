@@ -1,7 +1,8 @@
 #!/home/awikner1/miniconda3/envs/denpool/bin/python -u
-#SBATCH -t 240
+#SBATCH -t 96:00:00
 #SBATCH -n 1
 #SBATCH -c 1
+#SBATCH --mem=16384
 import h5py
 import pandas as pd
 import numpy as np
