@@ -4,6 +4,7 @@ from numba.experimental import jitclass
 from d2l import torch as d2l
 import torch
 from src.helpers import median_confidence
+from scipy.optimize import lsq_linear, minimize, LinearConstraint
 import time
 from statistics import median
 
@@ -243,33 +244,33 @@ class ProgressBoardVT(d2l.ProgressBoard):
         d2l.display.display(self.fig)
         d2l.display.clear_output(wait=True)
 
-# class LorenzPeriodicRhoData(LorenzDataModule):
-#     def __init__(self, true_model, model_zoo, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
-#                  batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
-#                  beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64):
-#         super().__init__()
-#         self.save_hyperparameters()
-#         n = num_train + num_val + 1
-#         self.model_zoo = [NumpyModel(model) for model in model_zoo]
-#         self.true_model = true_model
-#         data, times = true_model.run(n, num_discard)
-#         self.times = times
-#         model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
-#         for j, model in enumerate(model_zoo):
-#             model_data[:,j] = model.run_array(data[:-1])
-#         self.values  = torch.from_numpy(model_data[1:])
-#         self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
-#         self.keys    = torch.from_numpy(model_data[:-1]) - self.queries
-#         self.y       = torch.from_numpy(data[2:]).unsqueeze(1)
-#
-#     def get_dataloader(self, train):
-#         i = slice(0, self.num_train) if train else slice(self.num_train, None)
-#         return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
+class LorenzPeriodicRhoData(LorenzDataModule):
+    def __init__(self, true_model, model_zoo, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
+                 batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
+                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64):
+        super().__init__()
+        self.save_hyperparameters()
+        n = num_train + num_val + 1
+        self.model_zoo = [NumpyModel(model) for model in model_zoo]
+        self.true_model = true_model
+        data, times = true_model.run(n, num_discard)
+        self.times = times
+        model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
+        for j, model in enumerate(model_zoo):
+            model_data[:,j] = model.run_array(data[:-1])
+        self.values  = torch.from_numpy(model_data[1:])
+        self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
+        self.keys    = torch.from_numpy(model_data[:-1]) - self.queries
+        self.y       = torch.from_numpy(data[2:]).unsqueeze(1)
+
+    def get_dataloader(self, train):
+        i = slice(0, self.num_train) if train else slice(self.num_train, None)
+        return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
 
 class LorenzPeriodicRhoData(LorenzDataModule):
     def __init__(self, true_model, model_zoo, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
                  batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
-                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64, dtype = torch.float64):
+                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64):
         super().__init__()
         self.save_hyperparameters()
         n = num_train + num_val + 1
@@ -319,6 +320,45 @@ class LorenzPeriodicRhoTDEData(LorenzDataModule):
             self.keys[:,:,delay*data.shape[1]:(delay+1)*data.shape[1]] = \
                 torch.from_numpy(model_data[(self.time_delay-delay-1):(-1-delay)])
         self.keys = self.keys - self.queries
+        self.values  = self.values.type(dtype)
+        self.keys    = self.keys.type(dtype)
+        self.queries = self.queries.type(dtype)
+        self.y       = self.y.type(dtype)
+
+
+    def get_dataloader(self, train):
+        i = slice(0, self.num_train) if train else slice(self.num_train, None)
+        return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
+
+class LorenzPeriodicRhoTDENoDiffData(LorenzDataModule):
+    def __init__(self, true_model, model_zoo, time_delay = 1, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
+                 batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
+                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64, dtype = torch.float64):
+        super().__init__()
+        self.save_hyperparameters()
+        n = num_train + num_val + self.time_delay
+        self.model_zoo = [NumpyModel(model, dtype) for model in model_zoo]
+        self.true_model = true_model
+        data, times = true_model.run(n, num_discard)
+        self.times = times[self.time_delay:-1]
+        model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
+        for j, model in enumerate(model_zoo):
+            model_data[:,j] = model.run_array(data[:-1])
+        self.values  = torch.from_numpy(model_data[self.time_delay:])
+        #self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
+        #self.keys    = torch.from_numpy(model_data[:-1]) - self.queries
+        self.y       = torch.from_numpy(data[1+self.time_delay:]).unsqueeze(1)
+        self.keys = torch.zeros(model_data.shape[0] - self.time_delay,
+                                   model_data.shape[1],
+                                   model_data.shape[2] * self.time_delay)
+        self.queries    = torch.zeros(data.shape[0] - self.time_delay - 1,
+                                1,
+                                data.shape[1] * self.time_delay)
+        for delay in range(self.time_delay):
+            self.queries[:,0,delay*data.shape[1]:(delay+1)*data.shape[1]] =\
+                torch.from_numpy(data[(self.time_delay-delay):(-1-delay)])
+            self.keys[:,:,delay*data.shape[1]:(delay+1)*data.shape[1]] = \
+                torch.from_numpy(model_data[(self.time_delay-delay-1):(-1-delay)])
         self.values  = self.values.type(dtype)
         self.keys    = self.keys.type(dtype)
         self.queries = self.queries.type(dtype)
@@ -463,6 +503,45 @@ class AdditiveAttention(TimeSeriesAttention):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), self.lr)
 
+class NoAttention(TimeSeriesAttention):
+    """Additive attention."""
+    def __init__(self, feature_size, num_hiddens, output_size, dropout, lr, l1_reg = 0.001, **kwargs):
+        super(NoAttention, self).__init__(**kwargs)
+        #self.W_k = torch.nn.Linear(feature_size, num_hiddens, bias = True)
+        self.W_q = torch.nn.Linear(feature_size, num_hiddens, bias = True)
+        self.w_v = torch.nn.Linear(num_hiddens, output_size)
+        self.dropout = torch.nn.Dropout(dropout)
+        #self.sm = torch.nn.Softmax(dim = -1)
+        self.lr = lr
+        self.l1_reg = l1_reg
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def forward(self, queries, keys, values):
+        W_queries = self.W_q(queries)
+        # After dimension expansion, shape of queries: (batch_size, no. of
+        # queries, 1, num_hiddens) and shape of keys: (batch_size, 1, no. of
+        # key-value pairs, num_hiddens). Sum them up with broadcasting
+        #features_unsqueezed = W_queries.unsqueeze(2)
+        features = torch.tanh(W_queries)
+        # There is only one output of self.w_v, so we remove the last
+        # one-dimensional entry from the shape. Shape of scores: (batch_size,
+        # no. of queries, no. of key-value pairs)
+        #self.attention_weights = torch.matmul(features, self.w_v).squeeze(-1)
+        scores = self.w_v(features)
+        #self.attention_weights = self.sm(scores.squeeze(-1))
+        # self.attention_weights = masked_softmax(scores, valid_lens)
+        # Shape of values: (batch_size, no. of key-value pairs, value
+        # dimension)
+        return scores
+
+    def loss(self, y_hat, y):
+        l = (y_hat.reshape(-1) - y.reshape(-1)) **2 /2 + \
+            self.l1_reg * sum(torch.linalg.norm(p, 1) for p in self.parameters())
+        return l.mean()
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), self.lr)
+
 class InitAttention(TimeSeriesAttention):
     """Additive attention."""
     def __init__(self, feature_size, num_hiddens, dropout, lr, l1_reg = 0.001, **kwargs):
@@ -489,6 +568,7 @@ class InitAttention(TimeSeriesAttention):
         #self.attention_weights = torch.matmul(features, self.w_v).squeeze(-1)
         scores = self.w_v(features)
         self.attention_weights = self.sm(scores.squeeze(-1))
+
         # self.attention_weights = masked_softmax(scores, valid_lens)
         # Shape of values: (batch_size, no. of key-value pairs, value
         # dimension)
@@ -511,9 +591,7 @@ class IdiotAttention(TimeSeriesAttention):
         self.lr = lr
 
     def forward(self, queries, keys, values):
-        self.feature = torch.cat((queries.squeeze(1),
-                             keys.reshape(keys.size(0),-1),
-                             values.reshape(values.size(0),-1)), 1)
+        self.feature = values.reshape(values.size(0),-1)
         return self.W(self.feature).unsqueeze(1)
 
     def loss(self, y_hat, y):
@@ -535,16 +613,73 @@ class IdiotAttention(TimeSeriesAttention):
             self.W.weight= torch.nn.Parameter(torch.from_numpy(Wout[:-1].T))
             self.W.bias  = torch.nn.Parameter(torch.from_numpy(Wout[-1]))
 
+class LLRAttention(TimeSeriesAttention):
+    """Additive attention."""
+    def __init__(self, feature_size, output_size, **kwargs):
+        super(LLRAttention, self).__init__(**kwargs)
+        self.W   = torch.nn.Linear(feature_size, 1, bias = False)
+        self.output_size = output_size
+
+    def forward(self, queries, keys, values):
+        scale_mat = torch.mm(torch.ones(values.size(0),1), self.W.weight)
+        #print(scale_mat.unsqueeze(1).size())
+        #print(values.size())
+        return torch.bmm(scale_mat.unsqueeze(1), values)
+
+    def loss(self, y_hat, y):
+        l = (y_hat.reshape(-1) - y.reshape(-1)) **2 /2
+        return l.mean()
+
+    def configure_optimizers(self):
+        return torch.optim.SGD(self.parameters(), 0.)
+
+    def predict(self, queries_val, keys_val, values_val, model_zoo):
+        y_hat = torch.zeros(queries_val.size(0),
+                            queries_val.size(1),
+                            values_val.size(2))
+        self.get_weights(queries_val, keys_val)
+        queries_next, keys_next, values_next = queries_val[0].unsqueeze(0), \
+                                               keys_val[0].unsqueeze(0), \
+                                               values_val[0].unsqueeze(0)
+        y_hat[0] = self.forward(queries_next, keys_next, values_next)
+        for k in range(queries_val.size(0) - 1):
+            keys_next = values_next
+            queries_next = y_hat[k].unsqueeze(0)
+            # print(queries_next.size())
+            # print(queries_next.reshape(-1).size())
+            for j, model in enumerate(model_zoo):
+                values_next[:, j] = model.forward(queries_next.reshape(-1))
+            y_hat[k + 1] = self.forward(queries_next, keys_next, values_next)
+
+        return y_hat
+
+    def get_weights(self, queries, keys):
+        with torch.no_grad():
+            info_mat     = np.double(torch.mm(keys[0], keys[0].transpose(0,1)).detach().numpy())
+            target_mat   = np.double(torch.mm(queries[0], keys[0].transpose(0,1)).detach().numpy())
+            #print(self.W.weight)
+            #print(info_mat.shape)
+            #print(target_mat.shape)
+            prob_constr = LinearConstraint(np.ones(info_mat.shape[0]), 1., 1.)
+            hessp = lambda x, p: np.zeros(x.size)
+            min_fun = lambda x: np.mean((x @ info_mat - target_mat)**2.0)
+            Wout         = minimize(min_fun, np.ones((1, info_mat.shape[0]))/info_mat.shape[0],
+                                      method = 'trust-constr', hessp = hessp,
+                                      bounds = [(0,1)]*info_mat.shape[0],
+                                      constraints = prob_constr)
+            #print(Wout.x)
+            #Wout         = target_mat @ np.linalg.pinv(info_mat)
+            self.W.weight= torch.nn.Parameter(torch.from_numpy(Wout.x.reshape(1,-1)).type(torch.float32))
+            #print(self.W.weight)
+
 class DotProductAttention(TimeSeriesAttention):
     """Scaled dot product attention."""
-    def __init__(self, feature_size, dropout, lr, l1_reg = 0.001, num_hidden=None, **kwargs):
+    def __init__(self, feature_size, dropout, lr, num_hidden=None, **kwargs):
         super(DotProductAttention, self).__init__(**kwargs)
         self.dropout = torch.nn.Dropout(dropout)
         self.lr = lr
         self.sm = torch.nn.Softmax(dim=-1)
         self.num_hidden = num_hidden
-        self.l1_reg = l1_reg
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.num_hidden is not None:
             self.W_q = torch.nn.Linear(feature_size, num_hidden, bias=True)
             self.W_k = torch.nn.Linear(feature_size, num_hidden, bias=True)
@@ -562,8 +697,7 @@ class DotProductAttention(TimeSeriesAttention):
         return torch.bmm(self.dropout(self.attention_weights), values)
 
     def loss(self, y_hat, y):
-        l = (y_hat.reshape(-1) - y.reshape(-1))**2 / 2 + \
-            self.l1_reg * sum(torch.linalg.norm(p, 1) for p in self.parameters())
+        l = (y_hat.reshape(-1) - y.reshape(-1))**2 / 2
         return l.mean()
 
     def configure_optimizers(self):
