@@ -243,33 +243,33 @@ class ProgressBoardVT(d2l.ProgressBoard):
         d2l.display.display(self.fig)
         d2l.display.clear_output(wait=True)
 
+# class LorenzPeriodicRhoData(LorenzDataModule):
+#     def __init__(self, true_model, model_zoo, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
+#                  batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
+#                  beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64):
+#         super().__init__()
+#         self.save_hyperparameters()
+#         n = num_train + num_val + 1
+#         self.model_zoo = [NumpyModel(model) for model in model_zoo]
+#         self.true_model = true_model
+#         data, times = true_model.run(n, num_discard)
+#         self.times = times
+#         model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
+#         for j, model in enumerate(model_zoo):
+#             model_data[:,j] = model.run_array(data[:-1])
+#         self.values  = torch.from_numpy(model_data[1:])
+#         self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
+#         self.keys    = torch.from_numpy(model_data[:-1]) - self.queries
+#         self.y       = torch.from_numpy(data[2:]).unsqueeze(1)
+#
+#     def get_dataloader(self, train):
+#         i = slice(0, self.num_train) if train else slice(self.num_train, None)
+#         return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
+
 class LorenzPeriodicRhoData(LorenzDataModule):
     def __init__(self, true_model, model_zoo, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
                  batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
-                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64):
-        super().__init__()
-        self.save_hyperparameters()
-        n = num_train + num_val + 1
-        self.model_zoo = [NumpyModel(model) for model in model_zoo]
-        self.true_model = true_model
-        data, times = true_model.run(n, num_discard)
-        self.times = times
-        model_data = np.zeros((data.shape[0]-1, len(model_zoo), data.shape[1]))
-        for j, model in enumerate(model_zoo):
-            model_data[:,j] = model.run_array(data[:-1])
-        self.values  = torch.from_numpy(model_data[1:])
-        self.queries = torch.from_numpy(data[1:-1]).unsqueeze(1)
-        self.keys    = torch.from_numpy(model_data[:-1]) - self.queries
-        self.y       = torch.from_numpy(data[2:]).unsqueeze(1)
-
-    def get_dataloader(self, train):
-        i = slice(0, self.num_train) if train else slice(self.num_train, None)
-        return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
-
-class LorenzPeriodicRhoData(LorenzDataModule):
-    def __init__(self, true_model, model_zoo, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
-                 batch_size = 32, tau=0.1, int_steps=10, time=0., period=100., sigma=10.,
-                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64):
+                 beta=8 / 3, ic=np.array([]), ic_seed=0, val_size = 64, dtype = torch.float64):
         super().__init__()
         self.save_hyperparameters()
         n = num_train + num_val + 1
@@ -537,12 +537,14 @@ class IdiotAttention(TimeSeriesAttention):
 
 class DotProductAttention(TimeSeriesAttention):
     """Scaled dot product attention."""
-    def __init__(self, feature_size, dropout, lr, num_hidden=None, **kwargs):
+    def __init__(self, feature_size, dropout, lr, l1_reg = 0.001, num_hidden=None, **kwargs):
         super(DotProductAttention, self).__init__(**kwargs)
         self.dropout = torch.nn.Dropout(dropout)
         self.lr = lr
         self.sm = torch.nn.Softmax(dim=-1)
         self.num_hidden = num_hidden
+        self.l1_reg = l1_reg
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.num_hidden is not None:
             self.W_q = torch.nn.Linear(feature_size, num_hidden, bias=True)
             self.W_k = torch.nn.Linear(feature_size, num_hidden, bias=True)
@@ -560,7 +562,8 @@ class DotProductAttention(TimeSeriesAttention):
         return torch.bmm(self.dropout(self.attention_weights), values)
 
     def loss(self, y_hat, y):
-        l = (y_hat.reshape(-1) - y.reshape(-1))**2 / 2
+        l = (y_hat.reshape(-1) - y.reshape(-1))**2 / 2 + \
+            self.l1_reg * sum(torch.linalg.norm(p, 1) for p in self.parameters())
         return l.mean()
 
     def configure_optimizers(self):
