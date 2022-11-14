@@ -5,7 +5,10 @@ from d2l import torch as d2l
 import torch
 from src.helpers import median_confidence
 from scipy.optimize import lsq_linear, minimize, LinearConstraint
+import pandas as pd
 import time
+import timeit
+import h5py
 from statistics import median
 
 spec = [
@@ -368,6 +371,157 @@ class LorenzPeriodicRhoTDENoDiffData(LorenzDataModule):
     def get_dataloader(self, train):
         i = slice(0, self.num_train) if train else slice(self.num_train, None)
         return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
+
+class CovidDataAllTimes(d2l.DataModule):
+    def __init__(self, truth_path, ensemble_path, ensemble_models, alphas_eval, prediction_type,
+                 truth_type, start_date, end_date, locations):
+        super().__init__()
+        self.save_hyperparameters()
+        self.download()
+        self.fillin_lin_interp()
+
+    def download(self):
+        """
+        Read in truth and ensemble models data. Create numpy arrays to store data.
+        self.dates contains [num locations * num dates, 1] array of dates.
+        self.y contains [num locations * num dates, 1] array of ground truth data.
+        self.model_data contains [num locations * num dates, num models, num alphas] array of ensemble models data.
+        """
+        # Get data handles
+        self.f_truth = h5py.File(self.truth_path, 'r')
+        self.f_ensemble = h5py.File(self.ensemble_path, 'r')
+        # Get target data and dates
+        step = self.prediction_type[1]
+        for i, location in enumerate(self.locations):
+            targets_temp = self.f_truth[location][truth_type][:]
+            targets_temp = pd.DataFrame(targets_temp['value'],
+                                        index=[target.decode('UTF-8') for target in targets_temp['date']])
+            dates_temp = targets_temp[(targets_temp.index >= self.start_date) & \
+                                      (targets_temp.index <= self.end_date)].index[::step]
+            self.dates_len = dates_temp.shape[0]
+            targets_temp = targets_temp[(targets_temp.index >= self.start_date) & \
+                                        (targets_temp.index <= self.end_date)].values[::step]
+            if i == 0:
+                self.dates = np.array(dates_temp)
+                self.y = targets_temp
+            else:
+                self.dates = np.concatenate((self.dates, dates_temp), axis=0)
+                self.y = np.concatenate((self.y, targets_temp), axis=0)
+        # Initialize arrays for ensemble model data
+        self.alphas = [float(a) for a in self.alphas_eval[1:]]
+        self.alphas += [a / 2 for a in self.alphas]
+        self.alphas = sorted(list(set(self.alphas)))
+        self.alphas = ['point'] + ['quantile' + str(a) for a in self.alphas]
+        self.model_data = np.zeros(shape=(self.y.shape[0], len(self.ensemble_models), len(self.alphas)))
+        # Get model data
+        start_time = timeit.default_timer()
+        for i, model in enumerate(self.ensemble_models):
+            elapsed = timeit.default_timer() - start_time
+            print(f'Start of iteration {i + 1}. Time elapsed {elapsed} seconds.')
+            for j, location in enumerate(self.locations):
+                for k, date in enumerate(self.dates[j * self.dates_len:(j + 1) * self.dates_len]):
+                    for m, alpha in enumerate(self.alphas):
+                        date_list = self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]
+                        date_list = np.array([a.decode('UTF-8') for a in date_list['target_end_date']])
+                        if date in date_list:
+                            idx = np.argwhere(date_list == date)
+                            if len(idx) > 1:
+                                self.model_data[j * self.dates_len + k, i, m] = \
+                                self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx[0]]
+                            else:
+                                self.model_data[j * self.dates_len + k, i, m] = \
+                                self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx]
+                        else:
+                            self.model_data[j * self.dates_len + k, i, m] = np.nan
+
+    def _nan_helper(self, y):
+        """
+        Inputs:
+            y: 1D array
+        Returns:
+            logical indices of NaNs.
+            function to return indices of logical indices of NaNs.
+        """
+        return np.isnan(y), lambda z: z.nonzero()[0]
+
+    def fillin_lin_interp(self):
+        """
+        Fill in NaNs by linearly interpolate along time axis, for each ensemble model and alpha.
+        """
+        for i in range(len(self.ensemble_models)):
+            for j in range(len(self.alphas)):
+                y = self.model_data[:, i, j]
+                nans, x = self._nan_helper(y)
+                y[nans] = np.interp(x(nans), x(~nans), y[~nans])
+                self.model_data[:, i, j] = y
+
+
+class CovidDataLoader(d2l.DataModule):
+    def __init__(self, covid_train, covid_test, time_delays, batch_size=32, val_size=32, dtype=torch.float64):
+        super().__init__()
+        self.save_hyperparameters()
+        # Create queries, keys, values for training data, covid_train
+        self.n_train = covid_train.y.shape[0] - time_delays - 1
+        self.y_train = covid_train.y
+        self.queries_train = torch.zeros((self.n_train,
+                                          1,
+                                          self.y_train.shape[1] * self.time_delays))
+        self.keys_train = torch.zeros((self.n_train,
+                                       covid_train.model_data.shape[1],
+                                       covid_train.model_data.shape[2] * self.time_delays))
+        self.values_train = torch.from_numpy(covid_train.model_data[1 + self.time_delays:, :, :])
+        for delay in range(self.time_delays):
+            self.queries_train[:, 0, delay * self.y_train.shape[1]:(delay + 1) * self.y_train.shape[1]] = \
+                torch.from_numpy(self.y_train[(self.time_delays - delay):(-1 - delay), :])
+            self.keys_train[:, :,
+            delay * covid_train.model_data.shape[2]:(delay + 1) * covid_train.model_data.shape[2]] = \
+                torch.from_numpy(covid_train.model_data[(self.time_delays - delay):(-1 - delay), :, :])
+            self.keys_train[:, :, delay * covid_train.model_data.shape[2]] -= \
+                self.queries_train[:, 0, delay * self.y_train.shape[1]].unsqueeze(dim=1)
+        self.y_train = torch.from_numpy(self.y_train[1 + self.time_delays:].squeeze())
+        self.keys_train = self.keys_train
+        self.queries_train = self.queries_train.type(dtype)
+        self.keys_train = self.keys_train.type(dtype)
+        self.values_train = self.values_train.type(dtype)
+        # Create queries, keys, values for test data, covid_test
+        self.n_test = covid_test.y.shape[0] - time_delays - 1
+        self.y_test = covid_test.y
+        self.queries_test = torch.zeros((self.n_test,
+                                         1,
+                                         self.y_test.shape[1] * self.time_delays))
+        self.keys_test = torch.zeros((self.n_test,
+                                      covid_test.model_data.shape[1],
+                                      covid_test.model_data.shape[2] * self.time_delays))
+        self.values_test = torch.from_numpy(covid_test.model_data[1 + self.time_delays:, :, :])
+        for delay in range(self.time_delays):
+            self.queries_test[:, 0, delay * self.y_test.shape[1]:(delay + 1) * self.y_test.shape[1]] = \
+                torch.from_numpy(self.y_test[(self.time_delays - delay):(-1 - delay), :])
+            self.keys_test[:, :, delay * covid_test.model_data.shape[2]:(delay + 1) * covid_test.model_data.shape[2]] = \
+                torch.from_numpy(covid_test.model_data[(self.time_delays - delay):(-1 - delay), :, :])
+            self.keys_test[:, :, delay * covid_test.model_data.shape[2]] -= \
+                self.queries_test[:, 0, delay * self.y_test.shape[1]].unsqueeze(dim=1)
+        self.y_test = torch.from_numpy(self.y_test[1 + self.time_delays:].squeeze())
+        self.keys_test = self.keys_test
+        self.queries_test = self.queries_test.type(dtype)
+        self.keys_test = self.keys_test.type(dtype)
+        self.values_test = self.values_test.type(dtype)
+
+    def get_tensorloader(self, tensors, train, indices=slice(0, None)):
+        tensors = tuple(a[indices] for a in tensors)
+        dataset = torch.utils.data.TensorDataset(*tensors)
+        if train:
+            return torch.utils.data.DataLoader(dataset, self.batch_size, shuffle=train)
+        else:
+            return torch.utils.data.DataLoader(dataset, self.val_size, shuffle=train,
+                                               sampler=torch.utils.data.SequentialSampler(dataset))
+
+    def get_dataloader(self, train):
+        i = slice(0, self.n_train) if train else slice(0, self.n_test)
+        if train:
+            return self.get_tensorloader((self.queries_train, self.keys_train, self.values_train, self.y_train), train,
+                                         i)
+        else:
+            return self.get_tensorloader((self.queries_test, self.keys_test, self.values_test, self.y_test), train, i)
 
 class TeacherForcingData(LorenzDataModule):
     def __init__(self, data_in, trained_model, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
