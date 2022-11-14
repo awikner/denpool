@@ -178,7 +178,7 @@ class ProgressBoardVT(d2l.ProgressBoard):
                  ylim=[None, None], xscale=['linear', 'linear'], yscale=['log', 'linear'],
                  ls=['-', '--', '-.', ':'], colors=['C0', 'C1', 'C2', 'C3'],
                  legend_loc = [None,None], use_jupyter = True,
-                 fig=None, axes=None, figsize=(12, 6), display=True):
+                 fig=None, axes=None, figsize=(10, 5), display=True):
         super().__init__()
         self.save_hyperparameters()
 
@@ -738,14 +738,23 @@ class InitAttention(TimeSeriesAttention):
 
 class IdiotAttention(TimeSeriesAttention):
     """Additive attention."""
-    def __init__(self, feature_size, output_size, dropout, lr, **kwargs):
+    def __init__(self, feature_size, output_size, dropout, lr, time_delay, **kwargs):
         super(IdiotAttention, self).__init__(**kwargs)
         self.W   = torch.nn.Linear(feature_size, output_size, bias = True)
         self.dropout = torch.nn.Dropout(dropout)
         self.lr = lr
+        self.time_delay = time_delay
+        self.output_size = output_size
 
     def forward(self, queries, keys, values):
-        self.feature = values.reshape(values.size(0),-1)
+        if self.time_delay > 1:
+            #print((values.reshape(values.size(0),-1)).size())
+            #print((keys[:,:,:self.output_size*(self.time_delay-1)].reshape(keys.size(0), -1)).size())
+            self.feature = torch.cat((values.reshape(values.size(0),-1),
+                                     keys[:,:,:self.output_size*(self.time_delay-1)].reshape(keys.size(0), -1)),
+                                    dim = 1)
+        else:
+            self.feature = values.reshape(values.size(0),-1)
         return self.W(self.feature).unsqueeze(1)
 
     def loss(self, y_hat, y):
@@ -957,3 +966,12 @@ class TrainerAttentionVT(d2l.Trainer):
         self.model.plot('median_vt', pred[:,0,0], train=False, label_val = (vt, confidence))
         self.model = self.model.to(self.model.device)
         # self.model.plot('vt', (loss_sum / self.val_batch_idx), train=False)
+
+class CovidTrainer(TrainerAttentionVT):
+    def prepare_data(self, data):
+        self.train_dataloader = data.train_dataloader()
+        self.val_dataloader = data.val_dataloader()
+        self.alphas         = data.alphas
+        self.num_train_batches = len(self.train_dataloader)
+        self.num_val_batches = (len(self.val_dataloader)
+                                if self.val_dataloader is not None else 0)
