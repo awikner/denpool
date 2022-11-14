@@ -961,3 +961,12 @@ class TrainerAttentionVT(d2l.Trainer):
         self.model.plot('median_vt', pred[:,0,0], train=False, label_val = (vt, confidence))
         self.model = self.model.to(self.model.device)
         # self.model.plot('vt', (loss_sum / self.val_batch_idx), train=False)
+
+class CovidTrainer(TrainerAttentionVT):
+    def prepare_data(self, data):
+        self.train_dataloader = data.train_dataloader()
+        self.val_dataloader = data.val_dataloader()
+        self.alphas           = data.alphas
+        self.num_train_batches = len(self.train_dataloader)
+        self.num_val_batches = (len(self.val_dataloader)
+                                if self.val_dataloader is not None else 0)
