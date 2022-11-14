@@ -372,6 +372,7 @@ class LorenzPeriodicRhoTDENoDiffData(LorenzDataModule):
         i = slice(0, self.num_train) if train else slice(self.num_train, None)
         return self.get_tensorloader((self.queries, self.keys, self.values, self.y), train, i)
 
+
 class CovidDataAllTimes(d2l.DataModule):
     def __init__(self, truth_path, ensemble_path, ensemble_models, alphas_eval, prediction_type,
                  truth_type, start_date, end_date, locations):
@@ -399,6 +400,8 @@ class CovidDataAllTimes(d2l.DataModule):
             dates_temp = targets_temp[(targets_temp.index >= self.start_date) & \
                                       (targets_temp.index <= self.end_date)].index[::step]
             self.dates_len = dates_temp.shape[0]
+            targets_temp = targets_temp.cumsum()
+            targets_temp = targets_temp.subtract(targets_temp.shift(step, fill_value=0.))
             targets_temp = targets_temp[(targets_temp.index >= self.start_date) & \
                                         (targets_temp.index <= self.end_date)].values[::step]
             if i == 0:
@@ -459,7 +462,8 @@ class CovidDataAllTimes(d2l.DataModule):
 class CovidDataLoader(d2l.DataModule):
     def __init__(self, covid_train, covid_test, time_delays, batch_size=32, val_size=32, dtype=torch.float64):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['covid_train', 'covid_test'])
+        self.alphas_eval = covid_train.alphas_eval
         # Create queries, keys, values for training data, covid_train
         self.n_train = covid_train.y.shape[0] - time_delays - 1
         self.y_train = covid_train.y
