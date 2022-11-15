@@ -724,6 +724,55 @@ class AdditiveAttention(TimeSeriesAttention):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), self.lr)
 
+class CovidAdditiveAttention(d2l.Module):
+    """Additive attention."""
+    def __init__(self, query_size, key_size, num_hiddens, dropout, lr, alphas, l1_reg = 0.001, **kwargs):
+        super(CovidAdditiveAttention, self).__init__(**kwargs)
+        self.W_k = torch.nn.Linear(key_size, num_hiddens, bias = True)
+        self.W_q = torch.nn.Linear(query_size, num_hiddens, bias = False)
+        self.w_v = torch.nn.Linear(num_hiddens, 1)
+        self.dropout = torch.nn.Dropout(dropout)
+        self.sm = torch.nn.Softmax(dim = -1)
+        self.lr = lr
+        self.l1_reg = l1_reg
+        self.alphas = alphas
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def forward(self, queries, keys, values):
+        W_queries, W_keys = self.W_q(queries), self.W_k(keys)
+        # After dimension expansion, shape of queries: (batch_size, no. of
+        # queries, 1, num_hiddens) and shape of keys: (batch_size, 1, no. of
+        # key-value pairs, num_hiddens). Sum them up with broadcasting
+        features_unsqueezed = W_queries.unsqueeze(2) + W_keys.unsqueeze(1)
+        features = torch.tanh(features_unsqueezed)
+        # There is only one output of self.w_v, so we remove the last
+        # one-dimensional entry from the shape. Shape of scores: (batch_size,
+        # no. of queries, no. of key-value pairs)
+        #self.attention_weights = torch.matmul(features, self.w_v).squeeze(-1)
+        scores = self.w_v(features)
+        self.attention_weights = self.sm(scores.squeeze(-1))
+        # self.attention_weights = masked_softmax(scores, valid_lens)
+        # Shape of values: (batch_size, no. of key-value pairs, value
+        # dimension)
+        return torch.bmm(self.dropout(self.attention_weights), values)
+
+    def loss(self, y_hat, y):
+        median_scores = torch.abs(y - y_hat[:, :, 0].unsqueeze(-1))
+        interval_scores = self.interval_scores(y_hat, y)
+        loss = 0.5 * median_scores + torch.sum(0.5 * self.alphas * interval_scores, dim=2, keepdim=True)
+        return 1 / (self.alphas.size(-1) + 0.5) * loss.mean()
+
+    def interval_scores(self, y_hat, y):
+        l = y_hat[:, :, 1:self.alphas.size(-1) + 1]
+        u = torch.flip(y_hat[:, :, self.alphas.size(-1) + 1:], [2])
+        l_mask = y < l
+        u_mask = y > u
+        interval_scores = (u - l) + 2.0 / self.alphas * (l - y) * l_mask + 2.0 / self.alphas * (y - u) * u_mask
+        return interval_scores
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), self.lr)
+
 class NoAttention(TimeSeriesAttention):
     """Additive attention."""
     def __init__(self, feature_size, num_hiddens, output_size, dropout, lr, l1_reg = 0.001, **kwargs):
@@ -1053,24 +1102,9 @@ class CovidTrainer(d2l.Trainer):
     def prepare_data(self, data):
         self.train_dataloader  = data.train_dataloader()
         self.val_dataloader    = data.val_dataloader()
-        self.alphas            = torch.FloatTensor([float(alpha) for alpha in data.alphas_eval[1:]]).reshape(1,1,-1)
         self.num_train_batches = len(self.train_dataloader)
         self.num_val_batches   = (len(self.val_dataloader)
                                 if self.val_dataloader is not None else 0)
-
-    def loss(self, y_hat, y):
-        median_scores   = torch.abs(y - y_hat[:,:,0].unsqueeze(-1))
-        interval_scores = self.interval_scores(y_hat, y)
-        loss = 0.5*median_scores + torch.sum(0.5 * self.alphas * interval_scores, dim = 2, keepdim=True)
-        return 1/(self.alphas.size(-1) + 0.5)*loss.mean()
-
-    def interval_scores(self, y_hat, y):
-        l = y_hat[:,:,1:self.alphas.size(-1)+1]
-        u = torch.flip(y_hat[:,:,self.alphas.size(-1)+1:], [2])
-        l_mask = y < l
-        u_mask = y > u
-        interval_scores = (u-l) + 2.0/self.alphas*(l - y) * l_mask + 2.0/self.alphas*(y - u) * u_mask
-        return interval_scores
 
 
 
