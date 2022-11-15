@@ -375,11 +375,16 @@ class LorenzPeriodicRhoTDENoDiffData(LorenzDataModule):
 
 class CovidDataAllTimes(d2l.DataModule):
     def __init__(self, truth_path, ensemble_path, ensemble_models, alphas_eval, prediction_type,
-                 truth_type, start_date, end_date, locations):
+                 truth_type, start_date, end_date, locations, interp_from=None):
         super().__init__()
         self.save_hyperparameters()
         self.download()
-        self.fillin_lin_interp()
+        if interp_from is None:
+            self.model_data = self.fillin_lin_interp(self.model_data)
+        else:
+            self.model_cum_data = self.fillin_lin_interp(self.model_cum_data)
+            self.cum_to_instance()
+            self.fillin_from()
 
     def download(self):
         """
@@ -395,7 +400,7 @@ class CovidDataAllTimes(d2l.DataModule):
         step = self.prediction_type[1]
         for i, location in enumerate(self.locations):
             targets_temp = self.f_truth[location][self.truth_type][:]
-            targets_temp = pd.DataFrame(targets_temp['value'],
+            targets_temp = pd.DataFrame(targets_temp['value'], \
                                         index=[target.decode('UTF-8') for target in targets_temp['date']])
             dates_temp = targets_temp[(targets_temp.index >= self.start_date) & \
                                       (targets_temp.index <= self.end_date)].index[::step]
@@ -412,30 +417,65 @@ class CovidDataAllTimes(d2l.DataModule):
                 self.y = np.concatenate((self.y, targets_temp), axis=0)
         # Initialize arrays for ensemble model data
         self.alphas = [float(a) for a in self.alphas_eval[1:]]
-        self.alphas += [a / 2 for a in self.alphas]
+        self.alphas = [a / 2 for a in self.alphas] + [1 - a / 2 for a in self.alphas]
         self.alphas = sorted(list(set(self.alphas)))
         self.alphas = ['point'] + ['quantile' + str(a) for a in self.alphas]
         self.model_data = np.zeros(shape=(self.y.shape[0], len(self.ensemble_models), len(self.alphas)))
-        # Get model data
-        start_time = timeit.default_timer()
-        for i, model in enumerate(self.ensemble_models):
-            elapsed = timeit.default_timer() - start_time
-            print(f'Start of iteration {i + 1}. Time elapsed {elapsed} seconds.')
-            for j, location in enumerate(self.locations):
-                for k, date in enumerate(self.dates[j * self.dates_len:(j + 1) * self.dates_len]):
-                    for m, alpha in enumerate(self.alphas):
-                        date_list = self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]
-                        date_list = np.array([a.decode('UTF-8') for a in date_list['target_end_date']])
-                        if date in date_list:
-                            idx = np.argwhere(date_list == date)
-                            if len(idx) > 1:
-                                self.model_data[j * self.dates_len + k, i, m] = \
-                                self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx[0]]
+        if self.interp_from is None:
+            # Get model data
+            start_time = timeit.default_timer()
+            for i, model in enumerate(self.ensemble_models):
+                elapsed = timeit.default_timer() - start_time
+                print(f'Start of iteration {i + 1}. Time elapsed {elapsed} seconds.')
+                for j, location in enumerate(self.locations):
+                    for k, date in enumerate(self.dates[j * self.dates_len:(j + 1) * self.dates_len]):
+                        for m, alpha in enumerate(self.alphas):
+                            date_list = self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]
+                            date_list = np.array([a.decode('UTF-8') for a in date_list['target_end_date']])
+                            if date in date_list:
+                                idx = np.argwhere(date_list == date)
+                                if len(idx) > 1:
+                                    self.model_data[j * self.dates_len + k, i, m] = \
+                                    self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx[0]]
+                                else:
+                                    self.model_data[j * self.dates_len + k, i, m] = \
+                                    self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx]
                             else:
-                                self.model_data[j * self.dates_len + k, i, m] = \
-                                self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx]
-                        else:
-                            self.model_data[j * self.dates_len + k, i, m] = np.nan
+                                self.model_data[j * self.dates_len + k, i, m] = np.nan
+        else:
+            self.model_cum_data = np.zeros(shape=(self.y.shape[0], len(self.ensemble_models), len(self.alphas)))
+            # Get model data
+            start_time = timeit.default_timer()
+            for i, model in enumerate(self.ensemble_models):
+                elapsed = timeit.default_timer() - start_time
+                print(f'Start of iteration {i + 1}. Time elapsed {elapsed} seconds.')
+                for j, location in enumerate(self.locations):
+                    for k, date in enumerate(self.dates[j * self.dates_len:(j + 1) * self.dates_len]):
+                        for m, alpha in enumerate(self.alphas):
+                            date_list = self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]
+                            date_list = np.array([a.decode('UTF-8') for a in date_list['target_end_date']])
+                            date_cum_list = self.f_ensemble[model][location][self.interp_from][alpha][:]
+                            date_cum_list = np.array([a.decode('UTF-8') for a in date_cum_list['target_end_date']])
+                            if date in date_list:
+                                idx = np.argwhere(date_list == date)
+                                if len(idx) > 1:
+                                    self.model_data[j * self.dates_len + k, i, m] = \
+                                    self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx[0]]
+                                else:
+                                    self.model_data[j * self.dates_len + k, i, m] = \
+                                    self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx]
+                            else:
+                                self.model_data[j * self.dates_len + k, i, m] = np.nan
+                            if date in date_cum_list:
+                                idx = np.argwhere(date_cum_list == date)
+                                if len(idx) > 1:
+                                    self.model_cum_data[j * self.dates_len + k, i, m] = \
+                                    self.f_ensemble[model][location][self.interp_from][alpha][:]['value'][idx[0]]
+                                else:
+                                    self.model_cum_data[j * self.dates_len + k, i, m] = \
+                                    self.f_ensemble[model][location][self.interp_from][alpha][:]['value'][idx]
+                            else:
+                                self.model_cum_data[j * self.dates_len + k, i, m] = np.nan
 
     def _nan_helper(self, y):
         """
@@ -447,16 +487,39 @@ class CovidDataAllTimes(d2l.DataModule):
         """
         return np.isnan(y), lambda z: z.nonzero()[0]
 
-    def fillin_lin_interp(self):
+    def fillin_lin_interp(self, data):
         """
         Fill in NaNs by linearly interpolate along time axis, for each ensemble model and alpha.
         """
         for i in range(len(self.ensemble_models)):
             for j in range(len(self.alphas)):
-                y = self.model_data[:, i, j]
+                y = data[:, i, j]
                 nans, x = self._nan_helper(y)
                 y[nans] = np.interp(x(nans), x(~nans), y[~nans])
-                self.model_data[:, i, j] = y
+                data[:, i, j] = y
+        return data
+
+    def cum_to_instance(self):
+        """
+        Convert self.model_cum_data (cumulative data) to non-cumulative data.
+        """
+        for i in range(len(self.ensemble_models)):
+            for j in range(len(self.alphas)):
+                for k in range(len(self.locations)):
+                    idx1 = k * self.dates_len
+                    idx2 = (k + 1) * self.dates_len
+                    self.model_cum_data[idx1:idx2, i, j] = np.concatenate([np.array([self.model_cum_data[idx1, i, j]]),
+                                                                           np.diff(
+                                                                               self.model_cum_data[idx1:idx2, i, j])])
+
+    def fillin_from(self):
+        """
+        Interpolate missing elements of self.model from self.model_cum_data.
+        """
+        for i in range(len(self.ensemble_models)):
+            for j in range(len(self.alphas)):
+                idx = np.isnan(self.model_data[:, i, j])
+                self.model_data[idx, i, j] = self.model_cum_data[idx, i, j]
 
 
 class CovidDataLoader(d2l.DataModule):
