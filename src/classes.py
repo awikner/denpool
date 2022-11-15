@@ -394,7 +394,7 @@ class CovidDataAllTimes(d2l.DataModule):
         # Get target data and dates
         step = self.prediction_type[1]
         for i, location in enumerate(self.locations):
-            targets_temp = self.f_truth[location][truth_type][:]
+            targets_temp = self.f_truth[location][self.truth_type][:]
             targets_temp = pd.DataFrame(targets_temp['value'],
                                         index=[target.decode('UTF-8') for target in targets_temp['date']])
             dates_temp = targets_temp[(targets_temp.index >= self.start_date) & \
