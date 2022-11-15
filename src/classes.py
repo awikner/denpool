@@ -962,7 +962,31 @@ class TrainerAttentionVT(d2l.Trainer):
         self.model = self.model.to(self.model.device)
         # self.model.plot('vt', (loss_sum / self.val_batch_idx), train=False)
 
-class CovidTrainer(TrainerAttentionVT):
+class CovidTrainer(d2l.Trainer):
+    def prepare_batch(self, batch):
+        """Defined in :numref:`sec_linear_scratch`"""
+        return tuple([batch_elem.to(self.model.device) for batch_elem in batch])
+
+    def fit_epoch(self):
+        """Defined in :numref:`sec_linear_scratch`"""
+        self.model.train()
+        for batch in self.train_dataloader:
+            loss = self.model.training_step(self.prepare_batch(batch))
+            self.optim.zero_grad()
+            #with torch.no_grad():
+            loss.backward()
+            #if self.gradient_clip_val > 0:  # To be discussed later
+            #    self.clip_gradients(self.gradient_clip_val, self.model)
+            self.optim.step()
+            self.train_batch_idx += 1
+        if self.val_dataloader is None:
+            return
+        self.model.eval()
+        for batch in self.val_dataloader:
+            with torch.no_grad():
+                self.model.validation_step(self.prepare_batch(batch))
+            self.val_batch_idx += 1
+
     def prepare_data(self, data):
         self.train_dataloader  = data.train_dataloader()
         self.val_dataloader    = data.val_dataloader()
