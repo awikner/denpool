@@ -523,7 +523,7 @@ class CovidDataAllTimes(d2l.DataModule):
 
 
 class CovidDataLoader(d2l.DataModule):
-    def __init__(self, covid_train, covid_test, time_delays, batch_size=32, val_size=32, dtype=torch.float64):
+    def __init__(self, covid_train, covid_test, time_delays, batch_size=32, val_size=32, dtype=torch.float32):
         super().__init__()
         self.save_hyperparameters(ignore=['covid_train', 'covid_test'])
         self.alphas_eval = covid_train.alphas_eval
@@ -545,7 +545,7 @@ class CovidDataLoader(d2l.DataModule):
                 torch.from_numpy(covid_train.model_data[(self.time_delays - delay):(-1 - delay), :, :])
             self.keys_train[:, :, delay * covid_train.model_data.shape[2]] -= \
                 self.queries_train[:, 0, delay * self.y_train.shape[1]].unsqueeze(dim=1)
-        self.y_train = torch.from_numpy(self.y_train[1 + self.time_delays:].squeeze())
+        self.y_train = torch.unsqueeze(torch.from_numpy(self.y_train[1 + self.time_delays:]), dim=2)
         self.keys_train = self.keys_train
         self.queries_train = self.queries_train.type(dtype)
         self.keys_train = self.keys_train.type(dtype)
@@ -567,7 +567,7 @@ class CovidDataLoader(d2l.DataModule):
                 torch.from_numpy(covid_test.model_data[(self.time_delays - delay):(-1 - delay), :, :])
             self.keys_test[:, :, delay * covid_test.model_data.shape[2]] -= \
                 self.queries_test[:, 0, delay * self.y_test.shape[1]].unsqueeze(dim=1)
-        self.y_test = torch.from_numpy(self.y_test[1 + self.time_delays:].squeeze())
+        self.y_test = torch.unsqueeze(torch.from_numpy(self.y_test[1 + self.time_delays:]), dim=2)
         self.keys_test = self.keys_test
         self.queries_test = self.queries_test.type(dtype)
         self.keys_test = self.keys_test.type(dtype)
