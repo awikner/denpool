@@ -700,6 +700,7 @@ class AdditiveAttention(TimeSeriesAttention):
 
     def forward(self, queries, keys, values):
         W_queries, W_keys = self.W_q(queries), self.W_k(keys)
+
         # After dimension expansion, shape of queries: (batch_size, no. of
         # queries, 1, num_hiddens) and shape of keys: (batch_size, 1, no. of
         # key-value pairs, num_hiddens). Sum them up with broadcasting
