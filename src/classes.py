@@ -964,9 +964,28 @@ class TrainerAttentionVT(d2l.Trainer):
 
 class CovidTrainer(TrainerAttentionVT):
     def prepare_data(self, data):
-        self.train_dataloader = data.train_dataloader()
-        self.val_dataloader = data.val_dataloader()
-        self.alphas           = data.alphas
+        self.train_dataloader  = data.train_dataloader()
+        self.val_dataloader    = data.val_dataloader()
+        self.alphas            = torch.FloatTensor([float(alpha) for alpha in data.alphas[1:]]).reshape(1,1,-1)
         self.num_train_batches = len(self.train_dataloader)
-        self.num_val_batches = (len(self.val_dataloader)
+        self.num_val_batches   = (len(self.val_dataloader)
                                 if self.val_dataloader is not None else 0)
+
+    def loss(self, y_hat, y):
+        median_scores   = torch.abs(y - y_hat[:,:,0].unsqueeze(-1))
+        interval_scores = self.interval_scores(y_hat, y)
+        loss = 0.5*median_scores + torch.sum(0.5 * self.alphas * interval_scores, dim = 2, keepdim=True)
+        return 1/(self.alphas.size(-1) + 0.5)*loss.mean()
+
+    def interval_scores(self, y_hat, y):
+        l = y_hat[:,:,1:self.alphas.size(-1)+1]
+        u = torch.flip(y_hat[:,:,self.alphas.size(-1)+1:], [2])
+        l_mask = y < l
+        u_mask = y > u
+        interval_scores = (u-l) + 2.0/self.alphas*(l - y) * l_mask + 2.0/self.alphas*(y - u) * u_mask
+        return interval_scores
+
+
+
+
+
