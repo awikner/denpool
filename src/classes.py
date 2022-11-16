@@ -539,11 +539,11 @@ class CovidDataLoader(d2l.DataModule):
             return torch.utils.data.DataLoader(dataset, self.val_size, shuffle=train,
                                                sampler=torch.utils.data.SequentialSampler(dataset))
 
-    def get_dataloader(self, train):
+    def get_dataloader(self, train, shuffle_train=True):
         i = slice(0, self.n_train) if train else slice(0, self.n_test)
         if train:
-            return self.get_tensorloader((self.queries_train, self.keys_train, self.values_train, self.y_train), train,
-                                         i)
+            return self.get_tensorloader((self.queries_train, self.keys_train, self.values_train, self.y_train),
+                                         shuffle_train, i)
         else:
             return self.get_tensorloader((self.queries_test, self.keys_test, self.values_test, self.y_test), train, i)
 
