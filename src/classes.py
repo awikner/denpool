@@ -3,7 +3,7 @@ from numba import int32, float64
 from numba.experimental import jitclass
 from d2l import torch as d2l
 import torch
-from src.helpers import median_confidence
+from src.helpers import median_confidence, weighted_interval_score, interval_score
 from scipy.optimize import lsq_linear, minimize, LinearConstraint
 import pandas as pd
 import time
@@ -700,7 +700,6 @@ class AdditiveAttention(TimeSeriesAttention):
 
     def forward(self, queries, keys, values):
         W_queries, W_keys = self.W_q(queries), self.W_k(keys)
-
         # After dimension expansion, shape of queries: (batch_size, no. of
         # queries, 1, num_hiddens) and shape of keys: (batch_size, 1, no. of
         # key-value pairs, num_hiddens). Sum them up with broadcasting
@@ -758,18 +757,7 @@ class CovidAdditiveAttention(d2l.Module):
         return torch.bmm(self.dropout(self.attention_weights), values)
 
     def loss(self, y_hat, y):
-        median_scores = torch.abs(y - y_hat[:, :, 0].unsqueeze(-1))
-        interval_scores = self.interval_scores(y_hat, y)
-        loss = 0.5 * median_scores + torch.sum(0.5 * self.alphas * interval_scores, dim=2, keepdim=True)
-        return 1 / (self.alphas.size(-1) + 0.5) * loss.mean()
-
-    def interval_scores(self, y_hat, y):
-        l = y_hat[:, :, 1:self.alphas.size(-1) + 1]
-        u = torch.flip(y_hat[:, :, self.alphas.size(-1) + 1:], [2])
-        l_mask = y < l
-        u_mask = y > u
-        interval_scores = (u - l) + 2.0 / self.alphas * (l - y) * l_mask + 2.0 / self.alphas * (y - u) * u_mask
-        return interval_scores
+        return weighted_interval_score(y_hat, y, self.alphas)
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), self.lr)
@@ -1086,11 +1074,11 @@ class CovidTrainer(d2l.Trainer):
         for batch in self.train_dataloader:
             loss = self.model.training_step(self.prepare_batch(batch))
             self.optim.zero_grad()
-            #with torch.no_grad():
-            loss.backward()
-            #if self.gradient_clip_val > 0:  # To be discussed later
-            #    self.clip_gradients(self.gradient_clip_val, self.model)
-            self.optim.step()
+            with torch.no_grad():
+                loss.backward()
+                if self.gradient_clip_val > 0:  # To be discussed later
+                    self.clip_gradients(self.gradient_clip_val, self.model)
+                self.optim.step()
             self.train_batch_idx += 1
         if self.val_dataloader is None:
             return
