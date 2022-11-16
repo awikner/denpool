@@ -463,13 +463,16 @@ class CovidDataAllTimes(d2l.DataModule):
 
     def rescale_inv_max(self):
         """
-        For each (model, location, quantile level) data segment, rescale the segment by using
-        the max in that segment.
+        Rescale data for each location by dividing by the max value for that location in the
+        true (training) data set.
         """
-        for k in range(len(self.locations)):
+        self.rescale_factors = {}
+        for k, loc in enumerate(self.locations):
             idx = slice(k * self.dates_len, (k + 1) * self.dates_len)
-            self.y[idx, :] /= np.amax(self.y[idx, :])
-            self.model_data[idx, :, :] /= np.amax(self.model_data[idx, :, :])
+            norm = np.amax(self.y[idx, :])
+            self.y[idx, :] /= norm
+            self.model_data[idx, :, :] /= norm
+            self.rescale_factors[loc] = norm
 
 
 class CovidDataLoader(d2l.DataModule):
@@ -477,6 +480,10 @@ class CovidDataLoader(d2l.DataModule):
         super().__init__()
         self.save_hyperparameters(ignore=['covid_train', 'covid_test'])
         self.alphas_eval = covid_train.alphas_eval
+        self.rescale_factors_train = covid_train.rescale_factors
+        self.rescale_factors_test = covid_test.rescale_factors
+        self.dates_train = covid_train.dates[time_delays:covid_train.dates_len]
+        self.dates_test = covid_test.dates[time_delays:covid_test.dates_len]
         # Create queries, keys, values for training data, covid_train
         self.n_train = covid_train.y.shape[0] - time_delays - 1
         self.y_train = covid_train.y
