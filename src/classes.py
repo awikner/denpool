@@ -400,12 +400,12 @@ class CovidDataAllTimes(d2l.DataModule):
             targets_temp = pd.DataFrame(targets_temp['value'], \
                                         index=[target.decode('UTF-8') for target in targets_temp['date']])
             dates_temp = targets_temp[(targets_temp.index >= self.start_date) & \
-                                      (targets_temp.index <= self.end_date)].index[::step]
+                                      (targets_temp.index < self.end_date)].index[::step]
             self.dates_len = dates_temp.shape[0]
             targets_temp = targets_temp.cumsum()
             targets_temp = targets_temp.subtract(targets_temp.shift(step, fill_value=0.))
             targets_temp = targets_temp[(targets_temp.index >= self.start_date) & \
-                                        (targets_temp.index <= self.end_date)].values[::step]
+                                        (targets_temp.index < self.end_date)].values[::step]
             if i == 0:
                 self.dates = np.array(dates_temp)
                 self.y = targets_temp.astype(np.float32)
