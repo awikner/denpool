@@ -29,6 +29,6 @@ def weighted_interval_score(y_hat, y, alphas):
     median_scores = torch.abs(y - y_hat[:, :, 0].unsqueeze(-1))
     interval_scores = interval_score(y_hat, y, alphas)
     loss = 0.5 * median_scores + torch.sum(0.5 * alphas * interval_scores, dim=2, keepdim=True)
-    return 1 / (alphas.size(-1) + 0.5) * loss.mean()
+    return 1 / (alphas.size(-1) + 0.5) * loss
 
 

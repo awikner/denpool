@@ -757,7 +757,7 @@ class CovidAdditiveAttention(d2l.Module):
         return torch.bmm(self.dropout(self.attention_weights), values)
 
     def loss(self, y_hat, y):
-        return weighted_interval_score(y_hat, y, self.alphas)
+        return weighted_interval_score(y_hat, y, self.alphas).mean()
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), self.lr)
@@ -1067,9 +1067,11 @@ class CovidTrainer(d2l.Trainer):
     def prepare_batch(self, batch):
         """Defined in :numref:`sec_linear_scratch`"""
         return tuple([batch_elem.to(self.model.device) for batch_elem in batch])
+        #return batch
 
     def fit_epoch(self):
         """Defined in :numref:`sec_linear_scratch`"""
+        tic = time.perf_counter()
         self.model.train()
         for batch in self.train_dataloader:
             loss = self.model.training_step(self.prepare_batch(batch))
@@ -1087,6 +1089,8 @@ class CovidTrainer(d2l.Trainer):
             with torch.no_grad():
                 self.model.validation_step(self.prepare_batch(batch))
             self.val_batch_idx += 1
+        toc = time.perf_counter()
+        print('Epoch Runtime: %s sec.' % (toc - tic))
 
     def prepare_data(self, data):
         self.train_dataloader  = data.train_dataloader()
@@ -1094,7 +1098,6 @@ class CovidTrainer(d2l.Trainer):
         self.num_train_batches = len(self.train_dataloader)
         self.num_val_batches   = (len(self.val_dataloader)
                                 if self.val_dataloader is not None else 0)
-
 
 
 
