@@ -480,8 +480,8 @@ class CovidDataLoader(d2l.DataModule):
         super().__init__()
         self.save_hyperparameters(ignore=['covid_train', 'covid_test'])
         self.alphas_eval = covid_train.alphas_eval
-        self.rescale_factors_train = covid_train.rescale_factors
-        self.rescale_factors_test = covid_test.rescale_factors
+        #self.rescale_factors_train = covid_train.rescale_factors
+        #self.rescale_factors_test = covid_test.rescale_factors
         self.dates_train = covid_train.dates[time_delays:covid_train.dates_len]
         self.dates_test = covid_test.dates[time_delays:covid_test.dates_len]
         # Create queries, keys, values for training data, covid_train
@@ -1028,7 +1028,7 @@ class CovidTrainer(d2l.Trainer):
 
     def fit_epoch(self):
         """Defined in :numref:`sec_linear_scratch`"""
-        tic = time.perf_counter()
+        #tic = time.perf_counter()
         self.model.train()
         for batch in self.train_dataloader:
             loss = self.model.training_step(self.prepare_batch(batch))
@@ -1046,8 +1046,8 @@ class CovidTrainer(d2l.Trainer):
             with torch.no_grad():
                 self.model.validation_step(self.prepare_batch(batch))
             self.val_batch_idx += 1
-        toc = time.perf_counter()
-        print('Epoch Runtime: %s sec.' % (toc - tic))
+        #toc = time.perf_counter()
+        #print('Epoch Runtime: %s sec.' % (toc - tic))
 
     def prepare_data(self, data):
         self.train_dataloader  = data.train_dataloader()
