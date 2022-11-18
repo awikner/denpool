@@ -484,48 +484,82 @@ class CovidDataLoader(d2l.DataModule):
         self.rescale_factors_test = covid_test.rescale_factors
         self.dates_train = covid_train.dates[time_delays:covid_train.dates_len]
         self.dates_test = covid_test.dates[time_delays:covid_test.dates_len]
+        self.n_loc_train = len(covid_train.locations)
+        self.n_loc_test = len(covid_test.locations)
         # Create queries, keys, values for training data, covid_train
-        self.n_train = covid_train.y.shape[0] - time_delays - 1
-        self.y_train = covid_train.y
+        self.n_train = (len(self.dates_train) - 1) * self.n_loc_train
+        y_train = covid_train.y
         self.queries_train = torch.zeros((self.n_train,
                                           1,
-                                          self.y_train.shape[1] * self.time_delays))
+                                          y_train.shape[1] * self.time_delays))
         self.keys_train = torch.zeros((self.n_train,
                                        covid_train.model_data.shape[1],
                                        covid_train.model_data.shape[2] * self.time_delays))
-        self.values_train = torch.from_numpy(covid_train.model_data[1 + self.time_delays:, :, :])
-        for delay in range(self.time_delays):
-            self.queries_train[:, 0, delay * self.y_train.shape[1]:(delay + 1) * self.y_train.shape[1]] = \
-                torch.from_numpy(self.y_train[(self.time_delays - delay):(-1 - delay), :])
-            self.keys_train[:, :,
-            delay * covid_train.model_data.shape[2]:(delay + 1) * covid_train.model_data.shape[2]] = \
-                torch.from_numpy(covid_train.model_data[(self.time_delays - delay):(-1 - delay), :, :])
-            self.keys_train[:, :, delay * covid_train.model_data.shape[2]] -= \
-                self.queries_train[:, 0, delay * self.y_train.shape[1]].unsqueeze(dim=1)
-        self.y_train = torch.unsqueeze(torch.from_numpy(self.y_train[1 + self.time_delays:]), dim=2)
-        self.keys_train = self.keys_train
+        self.values_train = torch.zeros((self.n_train,
+                                         covid_train.model_data.shape[1],
+                                         covid_train.model_data.shape[2]))
+        self.y_train = torch.zeros((self.n_train, 1, 1))
+        for i, _ in enumerate(covid_train.locations):
+            for delay in range(self.time_delays):
+                idx = slice(i * (len(self.dates_train) - 1), (i + 1) * (len(self.dates_train) - 1))
+                self.queries_train[idx, 0, delay * y_train.shape[1]:(delay + 1) * y_train.shape[1]] = \
+                    torch.from_numpy(y_train[
+                                     (i * (len(self.dates_train) + self.time_delays) + self.time_delays - delay):(
+                                                 (i + 1) * (len(self.dates_train) + self.time_delays) - delay - 1), :])
+                self.keys_train[idx, :,
+                delay * covid_train.model_data.shape[2]:(delay + 1) * covid_train.model_data.shape[2]] = \
+                    torch.from_numpy(covid_train.model_data[
+                                     (i * (len(self.dates_train) + self.time_delays) + self.time_delays - delay):(
+                                                 (i + 1) * (len(self.dates_train) + self.time_delays) - delay - 1), :,
+                                     :])
+                self.keys_train[idx, :, delay * covid_train.model_data.shape[2]] -= \
+                    torch.from_numpy(y_train[
+                                     (i * (len(self.dates_train) + self.time_delays) + self.time_delays - delay - 1):(
+                                                 (i + 1) * (len(self.dates_train) + self.time_delays) - delay - 2), :])
+                self.values_train[idx, :, :] = torch.from_numpy(covid_train.model_data[(i * (
+                            len(self.dates_train) + self.time_delays) + 1 + self.time_delays):((i + 1) * (
+                            len(self.dates_train) + self.time_delays)), :, :])
+                self.y_train[idx, 0, 0] = torch.squeeze(torch.from_numpy(y_train[(i * (
+                            len(self.dates_train) + self.time_delays) + 1 + self.time_delays):((i + 1) * (
+                            len(self.dates_train) + self.time_delays))]))
         self.queries_train = self.queries_train.type(dtype)
         self.keys_train = self.keys_train.type(dtype)
         self.values_train = self.values_train.type(dtype)
         # Create queries, keys, values for test data, covid_test
-        self.n_test = covid_test.y.shape[0] - time_delays - 1
-        self.y_test = covid_test.y
+        self.n_test = (len(self.dates_test) - 1) * self.n_loc_test
+        y_test = covid_test.y
         self.queries_test = torch.zeros((self.n_test,
                                          1,
-                                         self.y_test.shape[1] * self.time_delays))
+                                         y_test.shape[1] * self.time_delays))
         self.keys_test = torch.zeros((self.n_test,
                                       covid_test.model_data.shape[1],
                                       covid_test.model_data.shape[2] * self.time_delays))
-        self.values_test = torch.from_numpy(covid_test.model_data[1 + self.time_delays:, :, :])
-        for delay in range(self.time_delays):
-            self.queries_test[:, 0, delay * self.y_test.shape[1]:(delay + 1) * self.y_test.shape[1]] = \
-                torch.from_numpy(self.y_test[(self.time_delays - delay):(-1 - delay), :])
-            self.keys_test[:, :, delay * covid_test.model_data.shape[2]:(delay + 1) * covid_test.model_data.shape[2]] = \
-                torch.from_numpy(covid_test.model_data[(self.time_delays - delay):(-1 - delay), :, :])
-            self.keys_test[:, :, delay * covid_test.model_data.shape[2]] -= \
-                self.queries_test[:, 0, delay * self.y_test.shape[1]].unsqueeze(dim=1)
-        self.y_test = torch.unsqueeze(torch.from_numpy(self.y_test[1 + self.time_delays:]), dim=2)
-        self.keys_test = self.keys_test
+        self.values_test = torch.zeros((self.n_test,
+                                        covid_test.model_data.shape[1],
+                                        covid_test.model_data.shape[2]))
+        self.y_test = torch.zeros((self.n_test, 1, 1))
+        for i, _ in enumerate(covid_test.locations):
+            for delay in range(self.time_delays):
+                idx = slice(i * (len(self.dates_test) - 1), (i + 1) * (len(self.dates_test) - 1))
+                self.queries_test[idx, 0, delay * y_test.shape[1]:(delay + 1) * y_test.shape[1]] = \
+                    torch.from_numpy(y_test[(i * (len(self.dates_test) + self.time_delays) + self.time_delays - delay):(
+                                (i + 1) * (len(self.dates_test) + self.time_delays) - delay - 1), :])
+                self.keys_test[idx, :,
+                delay * covid_test.model_data.shape[2]:(delay + 1) * covid_test.model_data.shape[2]] = \
+                    torch.from_numpy(covid_test.model_data[
+                                     (i * (len(self.dates_test) + self.time_delays) + self.time_delays - delay):(
+                                                 (i + 1) * (len(self.dates_test) + self.time_delays) - delay - 1), :,
+                                     :])
+                self.keys_test[idx, :, delay * covid_test.model_data.shape[2]] -= \
+                    torch.from_numpy(y_test[
+                                     (i * (len(self.dates_test) + self.time_delays) + self.time_delays - delay - 1):(
+                                                 (i + 1) * (len(self.dates_test) + self.time_delays) - delay - 2), :])
+                self.values_test[idx, :, :] = torch.from_numpy(covid_test.model_data[(i * (
+                            len(self.dates_test) + self.time_delays) + 1 + self.time_delays):((i + 1) * (
+                            len(self.dates_test) + self.time_delays)), :, :])
+                self.y_test[idx, 0, 0] = torch.squeeze(torch.from_numpy(y_test[(i * (
+                            len(self.dates_test) + self.time_delays) + 1 + self.time_delays):((i + 1) * (
+                            len(self.dates_test) + self.time_delays))]))
         self.queries_test = self.queries_test.type(dtype)
         self.keys_test = self.keys_test.type(dtype)
         self.values_test = self.values_test.type(dtype)
