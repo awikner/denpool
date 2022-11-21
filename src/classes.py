@@ -470,8 +470,8 @@ class CovidDataAllTimes(d2l.DataModule):
         for k, loc in enumerate(self.locations):
             idx = slice(k * self.dates_len, (k + 1) * self.dates_len)
             norm = np.amax(self.y[idx, :])
-            self.y[idx, :] /= norm
-            self.model_data[idx, :, :] /= norm
+            #self.y[idx, :] /= norm
+            #self.model_data[idx, :, :] /= norm
             self.rescale_factors[loc] = norm
 
 
@@ -480,8 +480,25 @@ class CovidDataLoader(d2l.DataModule):
         super().__init__()
         self.save_hyperparameters(ignore=['covid_train', 'covid_test'])
         self.alphas_eval = covid_train.alphas_eval
-        #self.rescale_factors_train = covid_train.rescale_factors
-        #self.rescale_factors_test = covid_test.rescale_factors
+        rescale = False
+        try:
+            self.rescale_factors = covid_train.rescale_factors
+            for location in covid_test.rescale_factors.keys():
+                if location not in self.rescale_factors:
+                    self.rescale_factors[location] = covid_test.rescale_factors[location]
+            rescale = True
+        except:
+            print('Training and testing data have not been rescaled.')
+        if rescale:
+            for k, loc in enumerate(covid_train.locations):
+                idx = slice(k * covid_train.dates_len, (k + 1) * covid_train.dates_len)
+                covid_train.y[idx, :] /= self.rescale_factors[loc]
+                covid_train.model_data[idx, :] /= self.rescale_factors[loc]
+            for k, loc in enumerate(covid_test.locations):
+                idx = slice(k * covid_test.dates_len, (k + 1) * covid_test.dates_len)
+                covid_test.y[idx, :] /= self.rescale_factors[loc]
+                covid_test.model_data[idx, :] /= self.rescale_factors[loc]
+
         self.dates_train = covid_train.dates[time_delays:covid_train.dates_len]
         self.dates_test = covid_test.dates[time_delays:covid_test.dates_len]
         self.n_loc_train = len(covid_train.locations)
@@ -570,7 +587,7 @@ class CovidDataLoader(d2l.DataModule):
         if train:
             return torch.utils.data.DataLoader(dataset, self.batch_size, shuffle=train)
         else:
-            return torch.utils.data.DataLoader(dataset, self.val_size, shuffle=train,
+            return torch.utils.data.DataLoader(dataset, self.batch_size, shuffle=train,
                                                sampler=torch.utils.data.SequentialSampler(dataset))
 
     def get_dataloader(self, train, shuffle_train=True):
