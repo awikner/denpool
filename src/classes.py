@@ -375,7 +375,7 @@ class LorenzPeriodicRhoTDENoDiffData(LorenzDataModule):
 
 class CovidDataAllTimes(d2l.DataModule):
     def __init__(self, truth_path, ensemble_path, ensemble_models, alphas_eval, prediction_type,
-                 truth_type, start_date, end_date, locations, rescale=None):
+                 truth_type, start_end_dates, locations, rescale=None):
         super().__init__()
         self.save_hyperparameters()
         self.download()
@@ -396,22 +396,25 @@ class CovidDataAllTimes(d2l.DataModule):
         # Get target data and dates
         step = self.prediction_type[1]
         for i, location in enumerate(self.locations):
-            targets_temp = self.f_truth[location][self.truth_type][:]
-            targets_temp = pd.DataFrame(targets_temp['value'], \
-                                        index=[target.decode('UTF-8') for target in targets_temp['date']])
-            dates_temp = targets_temp[(targets_temp.index >= self.start_date) & \
-                                      (targets_temp.index < self.end_date)].index[::step]
-            self.dates_len = dates_temp.shape[0]
-            targets_temp = targets_temp.cumsum()
-            targets_temp = targets_temp.subtract(targets_temp.shift(step, fill_value=0.))
-            targets_temp = targets_temp[(targets_temp.index >= self.start_date) & \
-                                        (targets_temp.index < self.end_date)].values[::step]
+            targets = self.f_truth[location]['Cumulative ' + self.truth_type.split(' ')[1]][:]
+            targets_df = pd.DataFrame(targets['value'],
+                                      index=[target.decode('UTF-8') for target in targets['date']])
+            if 'Incident' in self.truth_type:
+                targets_df = pd.DataFrame(targets_df.subtract(targets_df.shift(7, fill_value=0.)),
+                                          index=[target.decode('UTF-8') for target in targets['date']])
+            for j, date in enumerate(self.start_end_dates):
+                dates_temp = targets_df[(targets_df.index >= date[0]) & \
+                                        (targets_df.index < date[1])].index[::step]
+                targets_temp = targets_df[(targets_df.index >= date[0]) & \
+                                          (targets_df.index < date[1])].values[::step]
+                if (i == 0) & (j == 0):
+                    self.dates = np.array(dates_temp)
+                    self.y = targets_temp.astype(np.float32)
+                else:
+                    self.dates = np.concatenate((self.dates, dates_temp), axis=0)
+                    self.y = np.concatenate((self.y, targets_temp), axis=0)
             if i == 0:
-                self.dates = np.array(dates_temp)
-                self.y = targets_temp.astype(np.float32)
-            else:
-                self.dates = np.concatenate((self.dates, dates_temp), axis=0)
-                self.y = np.concatenate((self.y, targets_temp), axis=0)
+                self.dates_len = self.dates.shape[0]
         # Initialize arrays for ensemble model data
         self.alphas = [float(a) for a in self.alphas_eval[1:]]
         self.alphas = [a / 2 for a in self.alphas] + [1 - a / 2 for a in self.alphas]
@@ -470,8 +473,8 @@ class CovidDataAllTimes(d2l.DataModule):
         for k, loc in enumerate(self.locations):
             idx = slice(k * self.dates_len, (k + 1) * self.dates_len)
             norm = np.amax(self.y[idx, :])
-            #self.y[idx, :] /= norm
-            #self.model_data[idx, :, :] /= norm
+            # self.y[idx, :] /= norm
+            # self.model_data[idx, :, :] /= norm
             self.rescale_factors[loc] = norm
 
 
