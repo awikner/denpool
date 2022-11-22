@@ -455,14 +455,17 @@ class CovidDataAllTimes(d2l.DataModule):
 
     def fillin_lin_interp(self, data):
         """
-        Fill in NaNs by linearly interpolate along time axis, for each ensemble model and alpha.
+        Fill in NaNs by linearly interpolate along time axis, for each ensemble model, alpha,
+        and start and end date tuple.
         """
+        dates_start_end = np.append(np.array([0]), np.cumsum(np.array(self.dates_len)))
         for i in range(len(self.ensemble_models)):
             for j in range(len(self.alphas)):
-                y = data[:, i, j]
-                nans, x = self._nan_helper(y)
-                y[nans] = np.interp(x(nans), x(~nans), y[~nans])
-                data[:, i, j] = y
+                for k in range(len(dates_start_end)-1):
+                    y = data[dates_start_end[k]:dates_start_end[k+1], i, j]
+                    nans, x = self._nan_helper(y)
+                    y[nans] = np.interp(x(nans), x(~nans), y[~nans])
+                    data[dates_start_end[k]:dates_start_end[k+1], i, j] = y
         return data
 
     def rescale_inv_max(self):
