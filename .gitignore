@@ -128,5 +128,20 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Jupyter Notebooks
+*.ipynb
+
 # Torch Parameter files
 *.params
+
+# Data Files
+*.hdf5
+*.pth
+*.txt
+
+# Figures
+*.png
+*.JPG
+*.jpg
+*.jpeg
+*.pdf

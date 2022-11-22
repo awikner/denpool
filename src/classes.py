@@ -395,6 +395,7 @@ class CovidDataAllTimes(d2l.DataModule):
         self.f_ensemble = h5py.File(self.ensemble_path, 'r')
         # Get target data and dates
         step = self.prediction_type[1]
+        self.dates_len = []
         for i, location in enumerate(self.locations):
             targets = self.f_truth[location]['Cumulative ' + self.truth_type.split(' ')[1]][:]
             targets_df = pd.DataFrame(targets['value'],
@@ -413,8 +414,8 @@ class CovidDataAllTimes(d2l.DataModule):
                 else:
                     self.dates = np.concatenate((self.dates, dates_temp), axis=0)
                     self.y = np.concatenate((self.y, targets_temp), axis=0)
-            if i == 0:
-                self.dates_len = self.dates.shape[0]
+                if i == 0:
+                    self.dates_len.append(self.dates.shape[0])
         # Initialize arrays for ensemble model data
         self.alphas = [float(a) for a in self.alphas_eval[1:]]
         self.alphas = [a / 2 for a in self.alphas] + [1 - a / 2 for a in self.alphas]
@@ -427,20 +428,20 @@ class CovidDataAllTimes(d2l.DataModule):
             elapsed = timeit.default_timer() - start_time
             print(f'Start of iteration {i + 1}. Time elapsed {elapsed} seconds.')
             for j, location in enumerate(self.locations):
-                for k, date in enumerate(self.dates[j * self.dates_len:(j + 1) * self.dates_len]):
+                for k, date in enumerate(self.dates[j * sum(self.dates_len):(j + 1) * sum(self.dates_len)]):
                     for m, alpha in enumerate(self.alphas):
                         date_list = self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]
                         date_list = np.array([a.decode('UTF-8') for a in date_list['target_end_date']])
                         if date in date_list:
                             idx = np.argwhere(date_list == date)
                             if len(idx) > 1:
-                                self.model_data[j * self.dates_len + k, i, m] = \
+                                self.model_data[j * sum(self.dates_len) + k, i, m] = \
                                 self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx[0]]
                             else:
-                                self.model_data[j * self.dates_len + k, i, m] = \
+                                self.model_data[j * sum(self.dates_len) + k, i, m] = \
                                 self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx]
                         else:
-                            self.model_data[j * self.dates_len + k, i, m] = np.nan
+                            self.model_data[j * sum(self.dates_len) + k, i, m] = np.nan
 
     def _nan_helper(self, y):
         """
@@ -471,7 +472,7 @@ class CovidDataAllTimes(d2l.DataModule):
         """
         self.rescale_factors = {}
         for k, loc in enumerate(self.locations):
-            idx = slice(k * self.dates_len, (k + 1) * self.dates_len)
+            idx = slice(k * sum(self.dates_len), (k + 1) * sum(self.dates_len))
             norm = np.amax(self.y[idx, :])
             # self.y[idx, :] /= norm
             # self.model_data[idx, :, :] /= norm
