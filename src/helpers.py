@@ -31,4 +31,11 @@ def weighted_interval_score(y_hat, y, alphas):
     loss = 0.5 * median_scores + torch.sum(0.5 * alphas * interval_scores, dim=2, keepdim=True)
     return 1 / (alphas.size(-1) + 0.5) * loss
 
+def get_start_dates(dates, train_end, test_end, time_delay):
+    train_end_idx = dates.index(train_end)
+    test_end_idx  = dates.index(test_end)
+    test_start    = dates[train_end_idx - time_delay + 1]
+    train_start   = dates[test_end_idx - time_delay  + 1]
+    return train_start, test_start
+
 
