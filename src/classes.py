@@ -415,7 +415,7 @@ class CovidDataAllTimes(d2l.DataModule):
                     self.dates = np.concatenate((self.dates, dates_temp), axis=0)
                     self.y = np.concatenate((self.y, targets_temp), axis=0)
                 if i == 0:
-                    self.dates_len.append(self.dates.shape[0])
+                    self.dates_len.append(dates_temp.shape[0])
         # Initialize arrays for ensemble model data
         self.alphas = [float(a) for a in self.alphas_eval[1:]]
         self.alphas = [a / 2 for a in self.alphas] + [1 - a / 2 for a in self.alphas]
@@ -455,17 +455,16 @@ class CovidDataAllTimes(d2l.DataModule):
 
     def fillin_lin_interp(self, data):
         """
-        Fill in NaNs by linearly interpolate along time axis, for each ensemble model, alpha,
-        and start and end date tuple.
+        Fill in NaNs by linearly interpolate along time axis, for each ensemble model and alpha.
         """
-        dates_start_end = np.append(np.array([0]), np.cumsum(np.array(self.dates_len)))
+        idx_cum = np.concatenate([[0], np.cumsum(self.dates_len)])
         for i in range(len(self.ensemble_models)):
             for j in range(len(self.alphas)):
-                for k in range(len(dates_start_end)-1):
-                    y = data[dates_start_end[k]:dates_start_end[k+1], i, j]
+                for k in range(len(self.dates_len)):
+                    y = data[idx_cum[k]:idx_cum[k + 1], i, j]
                     nans, x = self._nan_helper(y)
                     y[nans] = np.interp(x(nans), x(~nans), y[~nans])
-                    data[dates_start_end[k]:dates_start_end[k+1], i, j] = y
+                    data[idx_cum[k]:idx_cum[k + 1], i, j] = y
         return data
 
     def rescale_inv_max(self):
@@ -535,7 +534,7 @@ class CovidDataLoader(d2l.DataModule):
         for i, _ in enumerate(covid_train.locations):
             for j in range(len(covid_train.dates_len)):
                 for delay in range(self.time_delays):
-                    idx = slice(i * (len(self.dates_train) - (len(idx_cum) - 1)) + idx_cum[j], \
+                    idx = slice(i * (len(self.dates_train) - (len(idx_cum) - 1)) + idx_cum[j], 
                                 i * (len(self.dates_train) - (len(idx_cum) - 1)) + idx_cum[j + 1])
                     self.queries_train[idx, 0, delay * y_train.shape[1]:(delay + 1) * y_train.shape[1]] = \
                         torch.from_numpy(y_train[
@@ -621,6 +620,7 @@ class CovidDataLoader(d2l.DataModule):
                                          shuffle_train, i)
         else:
             return self.get_tensorloader((self.queries_test, self.keys_test, self.values_test, self.y_test), train, i)
+
 
 class TeacherForcingData(LorenzDataModule):
     def __init__(self, data_in, trained_model, noise = 0., num_train = 1000, num_val = 1000, num_discard = 100,
