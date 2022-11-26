@@ -10,6 +10,9 @@ import time
 import timeit
 import h5py
 from statistics import median
+from datetime import datetime
+import itertools
+from itertools import product
 
 spec = [
     ('tau', float64),
@@ -375,73 +378,112 @@ class LorenzPeriodicRhoTDENoDiffData(LorenzDataModule):
 
 class CovidDataAllTimes(d2l.DataModule):
     def __init__(self, truth_path, ensemble_path, ensemble_models, alphas_eval, prediction_type,
-                 truth_type, start_end_dates, locations, rescale=None):
+                 truth_type, train_start_end_dates, test_start_end_dates, train_locations, test_locations,
+                 rescale=None, interp_max = 2):
         super().__init__()
         self.save_hyperparameters()
-        self.download()
-        self.model_data = self.fillin_lin_interp(self.model_data)
+        self.locations = sorted(list(set(train_locations).union(set(test_locations))))
+        print(len(self.locations))
+        self.get_date_range()
+        model_data, y = self.download()
+        model_data = self.fillin_lin_interp_mean_persistence(model_data)
         if rescale == "inv_max":
-            self.rescale_inv_max()
+            self.rescale_inv_max(y)
+        self.train_test_split(model_data, y)
+
+    def get_date_range(self):
+        all_dates = []
+        for pair in self.train_start_end_dates:
+            for date in pair:
+                all_dates.append(datetime.strptime(date, '%y-%m-%d'))
+        for pair in self.test_start_end_dates:
+            for date in pair:
+                all_dates.append(datetime.strptime(date, '%y-%m-%d'))
+        sorted_dates = [date.strftime("%y-%m-%d") for date in sorted(all_dates)]
+        self.date_range = (sorted_dates[0], sorted_dates[-1])
+        return
 
     def download(self):
         """
         Read in truth and ensemble models data. Create numpy arrays to store data.
         self.dates contains [num locations * num dates, 1] array of dates.
-        self.y contains [num locations * num dates, 1] array of ground truth data.
-        self.model_data contains [num locations * num dates, num models, num alphas] array of ensemble models data.
+        y contains [num locations * num dates, 1] array of ground truth data.
+        model_data contains [num locations * num dates, num models, num alphas] array of ensemble models data.
         """
         # Get data handles
         self.f_truth = h5py.File(self.truth_path, 'r')
         self.f_ensemble = h5py.File(self.ensemble_path, 'r')
         # Get target data and dates
         step = self.prediction_type[1]
-        self.dates_len = []
+        self.train_dates_len = []
+        self.test_dates_len  = []
         for i, location in enumerate(self.locations):
+            # Load in truth data from full data range, get all dates for true data
             targets = self.f_truth[location]['Cumulative ' + self.truth_type.split(' ')[1]][:]
             targets_df = pd.DataFrame(targets['value'],
                                       index=[target.decode('UTF-8') for target in targets['date']])
             if 'Incident' in self.truth_type:
                 targets_df = pd.DataFrame(targets_df.subtract(targets_df.shift(7, fill_value=0.)),
                                           index=[target.decode('UTF-8') for target in targets['date']])
-            for j, date in enumerate(self.start_end_dates):
+            dates_temp = targets_df[(targets_df.index >= self.date_range[0]) & \
+                                    (targets_df.index < self.date_range[1])].index[::step]
+            targets_temp = targets_df[(targets_df.index >= self.date_range[0]) & \
+                                      (targets_df.index < self.date_range[1])].values[::step]
+            if (i == 0):
+                self.dates = np.array(dates_temp)
+                y = targets_temp.astype(np.float32)
+            else:
+                self.dates = np.concatenate((self.dates, dates_temp), axis=0)
+                y = np.concatenate((y, targets_temp), axis=0)
+            if i == 0:
+                self.dates_len = self.dates.shape[0]
+            # For training and testing period, get corresponding dates
+            for j, date in enumerate(self.train_start_end_dates):
                 dates_temp = targets_df[(targets_df.index >= date[0]) & \
                                         (targets_df.index < date[1])].index[::step]
-                targets_temp = targets_df[(targets_df.index >= date[0]) & \
-                                          (targets_df.index < date[1])].values[::step]
                 if (i == 0) & (j == 0):
-                    self.dates = np.array(dates_temp)
-                    self.y = targets_temp.astype(np.float32)
+                    self.train_dates = np.array(dates_temp)
                 else:
-                    self.dates = np.concatenate((self.dates, dates_temp), axis=0)
-                    self.y = np.concatenate((self.y, targets_temp), axis=0)
+                    self.train_dates = np.concatenate((self.train_dates, dates_temp), axis=0)
                 if i == 0:
-                    self.dates_len.append(dates_temp.shape[0])
+                    self.train_dates_len.append(len(dates_temp))
+            for j, date in enumerate(self.test_start_end_dates):
+                dates_temp = targets_df[(targets_df.index >= date[0]) & \
+                                        (targets_df.index < date[1])].index[::step]
+                if (i == 0) & (j == 0):
+                    self.test_dates = np.array(dates_temp)
+                else:
+                    self.test_dates = np.concatenate((self.test_dates, dates_temp), axis=0)
+                if i == 0:
+                    self.test_dates_len.append(len(dates_temp))
+
         # Initialize arrays for ensemble model data
         self.alphas = [float(a) for a in self.alphas_eval[1:]]
         self.alphas = [a / 2 for a in self.alphas] + [1 - a / 2 for a in self.alphas]
         self.alphas = sorted(list(set(self.alphas)))
         self.alphas = ['point'] + ['quantile' + str(a) for a in self.alphas]
-        self.model_data = np.zeros(shape=(self.y.shape[0], len(self.ensemble_models), len(self.alphas)))
+        model_data = np.zeros(shape=(y.shape[0], len(self.ensemble_models), len(self.alphas)))
         # Get model data
         start_time = timeit.default_timer()
         for i, model in enumerate(self.ensemble_models):
             elapsed = timeit.default_timer() - start_time
             print(f'Start of iteration {i + 1}. Time elapsed {elapsed} seconds.')
             for j, location in enumerate(self.locations):
-                for k, date in enumerate(self.dates[j * sum(self.dates_len):(j + 1) * sum(self.dates_len)]):
+                for k, date in enumerate(self.dates[j * self.dates_len:(j + 1) * self.dates_len]):
                     for m, alpha in enumerate(self.alphas):
                         date_list = self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]
                         date_list = np.array([a.decode('UTF-8') for a in date_list['target_end_date']])
                         if date in date_list:
                             idx = np.argwhere(date_list == date)
                             if len(idx) > 1:
-                                self.model_data[j * sum(self.dates_len) + k, i, m] = \
+                                model_data[j * self.dates_len + k, i, m] = \
                                 self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx[0]]
                             else:
-                                self.model_data[j * sum(self.dates_len) + k, i, m] = \
+                                model_data[j * self.dates_len + k, i, m] = \
                                 self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx]
                         else:
-                            self.model_data[j * sum(self.dates_len) + k, i, m] = np.nan
+                            model_data[j * self.dates_len + k, i, m] = np.nan
+        return model_data, y
 
     def _nan_helper(self, y):
         """
@@ -453,153 +495,292 @@ class CovidDataAllTimes(d2l.DataModule):
         """
         return np.isnan(y), lambda z: z.nonzero()[0]
 
-    def fillin_lin_interp(self, data):
+    def get_interp_indices(self, y):
         """
-        Fill in NaNs by linearly interpolate along time axis, for each ensemble model and alpha.
+        Inputs:
+            :param y: 1D array with nans
+        :return:
+            Ordered list of lists, where each list contains a contiguous set of indices where y is nan
         """
-        idx_cum = np.concatenate([[0], np.cumsum(self.dates_len)])
+        nans, x = self._nan_helper(y)
+        all_idxs = nans.nonzero()[0]
+        split_idxs = []
+        split_idxs.append([all_idxs[0]])
+        for idx in all_idxs[1:]:
+            if split_idxs[-1][-1] == idx - 1:
+                split_idxs[-1].append(idx)
+            else:
+                split_idxs.append([idx])
+        return split_idxs
+
+    def fillin_lin_interp_mean_persistence(self, data):
+        """
+        Fill in NaNs by linearly interpolate along the time axis if the length of the period being
+        interpolated is less than self.interp_max. Otherwise, fill in the mean prediction produced by all other models.
+        If no models make a prediction, then use the persistence forecast.
+        """
+        total_size = 0
+        #idx_cum = np.concatenate([[0], np.cumsum(self.dates_len)])
+        empty_idxs = []
+        mean_fill_indices = np.zeros((len(self.ensemble_models), len(self.alphas), len(self.locations)), dtype = object)
+        #print(all_nan_indices.shape)
         for i in range(len(self.ensemble_models)):
             for j in range(len(self.alphas)):
-                for k in range(len(self.dates_len)):
-                    y = data[idx_cum[k]:idx_cum[k + 1], i, j]
+                for l in range(len(self.locations)):
+                    all_idxs = slice(l * self.dates_len, (l+1) * self.dates_len)
+                    y = data[all_idxs, i, j]
                     nans, x = self._nan_helper(y)
-                    y[nans] = np.interp(x(nans), x(~nans), y[~nans])
-                    data[idx_cum[k]:idx_cum[k + 1], i, j] = y
+                    interp_idxs = self.get_interp_indices(y)
+                    non_interp_idxs = []
+                    if 0 not in interp_idxs[0] and len(interp_idxs[0]) <= self.interp_max:
+                        y[interp_idxs[0]] = np.interp(interp_idxs[0], x(~nans), y[~nans])
+                    else:
+                        non_interp_idxs.append(0)
+                    if self.dates_len-1 not in interp_idxs[-1] and len(interp_idxs[-1]) <= self.interp_max:
+                        y[interp_idxs[-1]] = np.interp(interp_idxs[-1], x(~nans), y[~nans])
+                    else:
+                        non_interp_idxs.append(len(interp_idxs) - 1)
+                    for k, idxs in enumerate(interp_idxs[1:-1]):
+                        if len(idxs) <= self.interp_max:
+                            y[idxs] = np.interp(idxs, x(~nans), y[~nans])
+                        else:
+                            non_interp_idxs.append(k+1)
+
+                    #print(non_interp_idxs)
+                    mean_fill_indices[i,j,l] = [interp_idxs[q] for q in non_interp_idxs]
+                    data[all_idxs, i, j] = y
+        for i, j, l in product(range(len(self.ensemble_models)), range(len(self.alphas)), range(len(self.locations))):
+            all_idxs = slice(l * self.dates_len, (l + 1) * self.dates_len)
+            y = data[all_idxs, i, j]
+            for idxs in mean_fill_indices[i,j,l]:
+                y_sum = np.zeros(y[idxs].shape)
+                y_count = np.zeros(y[idxs].shape)
+                for k in range(len(self.ensemble_models)):
+                    for m, idx in enumerate(idxs):
+                        if idx not in list(itertools.chain.from_iterable(mean_fill_indices[k, j, l])):
+                            y_sum[m] += data[l * self.dates_len + idx, k, j]
+                            y_count[m] += 1
+                if np.any(y_count == 0):
+                    for m, count in enumerate(y_count):
+                        if count == 0:
+                            print('No predictions found for alpha %d, location %s, time index %d' % \
+                                  (j, self.locations[j], idxs[m]))
+                            if idxs[m] < max(mean_fill_indices[i, j, l][0])+1:
+                                y[idxs[m]] = y[mean_fill_indices[i,j,l][0][-1]+1]
+                            else:
+                                y[idxs[m]] = y[idxs[m]-1]
+                        else:
+                            y[idxs[m]] = y_sum[m] / count
+                else:
+                    y[idxs] = y_sum / y_count
+            data[all_idxs, i, j] = y
         return data
 
-    def rescale_inv_max(self):
+    def rescale_inv_max(self, y):
         """
         Rescale data for each location by dividing by the max value for that location in the
-        true (training) data set.
+        true (training) data set. If the location is not in the training set, use the true value from the test set.
         """
         self.rescale_factors = {}
-        for k, loc in enumerate(self.locations):
-            idx = slice(k * sum(self.dates_len), (k + 1) * sum(self.dates_len))
-            norm = np.amax(self.y[idx, :])
-            # self.y[idx, :] /= norm
-            # self.model_data[idx, :, :] /= norm
-            self.rescale_factors[loc] = norm
+        for l, loc in enumerate(self.locations):
+            if loc in self.train_locations:
+                dates_ind_dict = dict((k, i + l * self.dates_len) for i, k in \
+                                      enumerate(self.dates[l * self.dates_len:(l + 1) * self.dates_len]))
+                train_inter = set(dates_ind_dict).intersection( \
+                    self.train_dates[l * sum(self.train_dates_len):(l + 1) * sum(self.train_dates_len)])
+                train_indices = np.sort(np.array([dates_ind_dict[x] for x in train_inter]))
+
+                #idx = slice(l * sum(self.dates_len), (l + 1) * sum(self.dates_len))
+                norm = np.amax(y[train_indices, :])
+                # y[idx, :] /= norm
+                # self.model_data[idx, :, :] /= norm
+                self.rescale_factors[loc] = norm
+            else:
+                dates_ind_dict = dict((k, i + l * self.dates_len) for i, k in \
+                                      enumerate(self.dates[l * self.dates_len:(l + 1) * self.dates_len]))
+                test_inter = set(dates_ind_dict).intersection( \
+                    self.test_dates[l * sum(self.test_dates_len):(l + 1) * sum(self.test_dates_len)])
+                test_indices = np.sort(np.array([dates_ind_dict[x] for x in test_inter]))
+
+                # idx = slice(l * sum(self.dates_len), (l + 1) * sum(self.dates_len))
+                norm = np.amax(y[test_indices, :])
+                # self.y[idx, :] /= norm
+                # self.model_data[idx, :, :] /= norm
+                self.rescale_factors[loc] = norm
+
+
+    def train_test_split(self, model_data, y):
+        """
+        Inputs:
+            :param model_data:
+            :param y:
+        :return:
+
+        Splits the model data and y into their respective portions, and saves them to the class.
+        """
+        locations_ind_dict = dict((k,i) for i,k in enumerate(self.locations))
+        train_l_inter = set(locations_ind_dict).intersection(self.train_locations)
+        train_l_indices = np.sort(np.array([locations_ind_dict[x] for x in train_l_inter]))
+        test_l_inter = set(locations_ind_dict).intersection(self.test_locations)
+        test_l_indices = np.sort(np.array([locations_ind_dict[x] for x in test_l_inter]))
+        for l in train_l_indices:
+            dates_ind_dict = dict((k,i+l*self.dates_len) for i,k in \
+                                  enumerate(self.dates[l*self.dates_len:(l+1)*self.dates_len]))
+
+            train_inter = set(dates_ind_dict).intersection(\
+                self.train_dates[l*sum(self.train_dates_len):(l+1)*sum(self.train_dates_len)])
+            train_indices = np.sort(np.array([dates_ind_dict[x] for x in train_inter]))
+
+            if l == 0:
+                self.train_model_data = model_data[train_indices]
+                self.train_y          = y[train_indices]
+            else:
+                self.train_model_data = np.concatenate((self.train_model_data,
+                                                   model_data[train_indices]), axis = 0)
+                self.train_y          = np.concatenate((self.train_y,
+                                                   y[train_indices]), axis = 0)
+        for l in test_l_indices:
+            dates_ind_dict = dict((k, i + l * self.dates_len) for i, k in \
+                                  enumerate(self.dates[l * self.dates_len:(l + 1) * self.dates_len]))
+
+            test_inter = set(dates_ind_dict).intersection( \
+                self.test_dates[l * sum(self.test_dates_len):(l + 1) * sum(self.test_dates_len)])
+            test_indices = np.sort(np.array([dates_ind_dict[x] for x in test_inter]))
+
+            if l == 0:
+                self.test_model_data = model_data[test_indices]
+                self.test_y = y[test_indices]
+            else:
+                self.test_model_data = np.concatenate((self.test_model_data,
+                                                   model_data[test_indices]), axis=0)
+                self.test_y = np.concatenate((self.test_y,
+                                          y[test_indices]), axis=0)
+
+
+
+
+
 
 
 class CovidDataLoader(d2l.DataModule):
-    def __init__(self, covid_train, covid_test, time_delays, batch_size=32, val_size=32, dtype=torch.float32):
+    def __init__(self, covid_data, time_delays, batch_size=32, val_size=32, dtype=torch.float32):
         super().__init__()
-        self.save_hyperparameters(ignore=['covid_train', 'covid_test'])
-        self.alphas_eval = covid_train.alphas_eval
+        self.save_hyperparameters(ignore=['covid_data'])
+        self.alphas_eval = covid_data.alphas_eval
         rescale = False
         try:
-            self.rescale_factors = covid_train.rescale_factors
-            for location in covid_test.rescale_factors.keys():
-                if location not in self.rescale_factors:
-                    self.rescale_factors[location] = covid_test.rescale_factors[location]
+            self.rescale_factors = covid_data.rescale_factors
             rescale = True
         except:
             print('Training and testing data have not been rescaled.')
         if rescale:
-            for k, loc in enumerate(covid_train.locations):
-                idx = slice(k * sum(covid_train.dates_len), (k + 1) * sum(covid_train.dates_len))
-                covid_train.y[idx, :] /= self.rescale_factors[loc]
-                covid_train.model_data[idx, :] /= self.rescale_factors[loc]
-            for k, loc in enumerate(covid_test.locations):
-                idx = slice(k * sum(covid_test.dates_len), (k + 1) * sum(covid_test.dates_len))
-                covid_test.y[idx, :] /= self.rescale_factors[loc]
-                covid_test.model_data[idx, :] /= self.rescale_factors[loc]
+            for k, loc in enumerate(covid_data.train_locations):
+                idx = slice(k * sum(covid_data.train_dates_len), (k + 1) * sum(covid_data.train_dates_len))
+                covid_data.train_y[idx, :] /= self.rescale_factors[loc]
+                covid_data.train_model_data[idx, :] /= self.rescale_factors[loc]
+            for k, loc in enumerate(covid_data.test_locations):
+                idx = slice(k * sum(covid_data.test_dates_len), (k + 1) * sum(covid_data.test_dates_len))
+                covid_data.test_y[idx, :] /= self.rescale_factors[loc]
+                covid_data.test_model_data[idx, :] /= self.rescale_factors[loc]
 
         self.dates_train, self.dates_test = [], []
-        idx = np.concatenate([[0], np.cumsum(covid_train.dates_len)])
-        for i, _ in enumerate(covid_train.dates_len):
-            self.dates_train.append(covid_train.dates[(idx[i] + time_delays):idx[i + 1]])
+        idx = np.concatenate([[0], np.cumsum(covid_data.train_dates_len)])
+        for i, _ in enumerate(covid_data.train_dates_len):
+            self.dates_train.append(covid_data.train_dates[(idx[i] + time_delays):idx[i + 1]])
         self.dates_train = np.concatenate(self.dates_train)
-        idx = np.concatenate([[0], np.cumsum(covid_test.dates_len)])
-        for i, _ in enumerate(covid_test.dates_len):
-            self.dates_test.append(covid_test.dates[(idx[i] + time_delays):idx[i + 1]])
+        idx = np.concatenate([[0], np.cumsum(covid_data.test_dates_len)])
+        for i, _ in enumerate(covid_data.test_dates_len):
+            self.dates_test.append(covid_data.test_dates[(idx[i] + time_delays):idx[i + 1]])
         self.dates_test = np.concatenate(self.dates_test)
-        self.n_loc_train = len(covid_train.locations)
-        self.n_loc_test = len(covid_test.locations)
+        self.n_loc_train = len(covid_data.train_locations)
+        self.n_loc_test = len(covid_data.test_locations)
         # Create queries, keys, values for training data, covid_train
-        self.n_train = (len(self.dates_train) - len(covid_train.dates_len)) * self.n_loc_train
-        y_train = covid_train.y
+        self.n_train = (len(self.dates_train) - len(covid_data.train_dates_len)) * self.n_loc_train
+        y_train = covid_data.train_y
         self.queries_train = torch.zeros((self.n_train,
                                           1,
                                           y_train.shape[1] * self.time_delays))
         self.keys_train = torch.zeros((self.n_train,
-                                       covid_train.model_data.shape[1],
-                                       covid_train.model_data.shape[2] * self.time_delays))
+                                       covid_data.train_model_data.shape[1],
+                                       covid_data.train_model_data.shape[2] * self.time_delays))
         self.values_train = torch.zeros((self.n_train,
-                                         covid_train.model_data.shape[1],
-                                         covid_train.model_data.shape[2]))
+                                         covid_data.train_model_data.shape[1],
+                                         covid_data.train_model_data.shape[2]))
         self.y_train = torch.zeros((self.n_train, 1, 1))
-        idx_cum = np.concatenate([[0], np.cumsum([a - 1 - self.time_delays for a in covid_train.dates_len])])
-        idx_cum_2 = np.concatenate([[0], np.cumsum(covid_train.dates_len)])
-        for i, _ in enumerate(covid_train.locations):
-            for j in range(len(covid_train.dates_len)):
+        idx_cum = np.concatenate([[0], np.cumsum([a - 1 - self.time_delays for a in covid_data.train_dates_len])])
+        idx_cum_2 = np.concatenate([[0], np.cumsum(covid_data.train_dates_len)])
+        for i, _ in enumerate(covid_data.train_locations):
+            for j in range(len(covid_data.train_dates_len)):
                 for delay in range(self.time_delays):
                     idx = slice(i * (len(self.dates_train) - (len(idx_cum) - 1)) + idx_cum[j], 
                                 i * (len(self.dates_train) - (len(idx_cum) - 1)) + idx_cum[j + 1])
-                    self.queries_train[idx, 0, delay * y_train.shape[1]:(delay + 1) * y_train.shape[1]] = \
-                        torch.from_numpy(y_train[
-                                         (i * sum(covid_train.dates_len) + idx_cum_2[j] + self.time_delays - delay):(
-                                                 i * sum(covid_train.dates_len) + idx_cum_2[j + 1] - delay - 1), :])
+                    try:
+                        self.queries_train[idx, 0, delay * y_train.shape[1]:(delay + 1) * y_train.shape[1]] = \
+                            torch.from_numpy(y_train[
+                                         (i * sum(covid_data.train_dates_len) + idx_cum_2[j] + self.time_delays - delay):(
+                                                 i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1] - delay - 1), :])
+                    except:
+                        print('Exception for i = %d, j = %d' % (i, j))
                     self.keys_train[idx, :,
-                    delay * covid_train.model_data.shape[2]:(delay + 1) * covid_train.model_data.shape[2]] = \
-                        torch.from_numpy(covid_train.model_data[
-                                         (i * sum(covid_train.dates_len) + idx_cum_2[j] + self.time_delays - delay):(
-                                                 i * sum(covid_train.dates_len) + idx_cum_2[j + 1] - delay - 1), :,
+                    delay * covid_data.train_model_data.shape[2]:(delay + 1) * covid_data.train_model_data.shape[2]] = \
+                        torch.from_numpy(covid_data.train_model_data[
+                                         (i * sum(covid_data.train_dates_len) + idx_cum_2[j] + self.time_delays - delay):(
+                                                 i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1] - delay - 1), :,
                                          :])
-                    self.keys_train[idx, :, delay * covid_train.model_data.shape[2]] -= \
+                    self.keys_train[idx, :, delay * covid_data.train_model_data.shape[2]] -= \
                         torch.from_numpy(y_train[
-                                         (i * sum(covid_train.dates_len) + idx_cum_2[
+                                         (i * sum(covid_data.train_dates_len) + idx_cum_2[
                                              j] + self.time_delays - delay - 1):(
-                                                 i * sum(covid_train.dates_len) + idx_cum_2[j + 1] - delay - 2), :])
+                                                 i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1] - delay - 2), :])
                     self.values_train[idx, :, :] = torch.from_numpy(
-                        covid_train.model_data[(i * sum(covid_train.dates_len) + self.time_delays + idx_cum_2[j] + 1):(
-                                i * sum(covid_train.dates_len) + idx_cum_2[j + 1]), :, :])
+                        covid_data.train_model_data[(i * sum(covid_data.train_dates_len) + self.time_delays + idx_cum_2[j] + 1):(
+                                i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1]), :, :])
                     self.y_train[idx, 0, 0] = torch.squeeze(torch.from_numpy(
-                        y_train[(i * sum(covid_train.dates_len) + self.time_delays + idx_cum_2[j] + 1):(
-                                i * sum(covid_train.dates_len) + idx_cum_2[j + 1])]))
+                        y_train[(i * sum(covid_data.train_dates_len) + self.time_delays + idx_cum_2[j] + 1):(
+                                i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1])]))
         self.queries_train = self.queries_train.type(dtype)
         self.keys_train = self.keys_train.type(dtype)
         self.values_train = self.values_train.type(dtype)
         # Create queries, keys, values for test data, covid_test
-        self.n_test = (len(self.dates_test) - len(covid_test.dates_len)) * self.n_loc_test
-        y_test = covid_test.y
+        self.n_test = (len(self.dates_test) - len(covid_data.test_dates_len)) * self.n_loc_test
+        y_test = covid_data.test_y
         self.queries_test = torch.zeros((self.n_test,
                                          1,
                                          y_test.shape[1] * self.time_delays))
         self.keys_test = torch.zeros((self.n_test,
-                                      covid_test.model_data.shape[1],
-                                      covid_test.model_data.shape[2] * self.time_delays))
+                                      covid_data.test_model_data.shape[1],
+                                      covid_data.test_model_data.shape[2] * self.time_delays))
         self.values_test = torch.zeros((self.n_test,
-                                        covid_test.model_data.shape[1],
-                                        covid_test.model_data.shape[2]))
+                                        covid_data.test_model_data.shape[1],
+                                        covid_data.test_model_data.shape[2]))
         self.y_test = torch.zeros((self.n_test, 1, 1))
-        idx_cum = np.concatenate([[0], np.cumsum([a - 1 - time_delays for a in covid_test.dates_len])])
-        idx_cum_2 = np.concatenate([[0], np.cumsum(covid_test.dates_len)])
-        for i, _ in enumerate(covid_test.locations):
-            for j in range(len(covid_test.dates_len)):
+        idx_cum = np.concatenate([[0], np.cumsum([a - 1 - time_delays for a in covid_data.test_dates_len])])
+        idx_cum_2 = np.concatenate([[0], np.cumsum(covid_data.test_dates_len)])
+        for i, _ in enumerate(covid_data.test_locations):
+            for j in range(len(covid_data.test_dates_len)):
                 for delay in range(self.time_delays):
                     idx = slice(i * (len(self.dates_test) - (len(idx_cum) - 1)) + idx_cum[j],
                                 i * (len(self.dates_test) - (len(idx_cum) - 1)) + idx_cum[j + 1])
                     self.queries_test[idx, 0, delay * y_test.shape[1]:(delay + 1) * y_test.shape[1]] = \
                         torch.from_numpy(y_test[
-                                         (i * sum(covid_test.dates_len) + idx_cum_2[j] + self.time_delays - delay):(
-                                                 i * sum(covid_test.dates_len) + idx_cum_2[j + 1] - delay - 1), :])
+                                         (i * sum(covid_data.test_dates_len) + idx_cum_2[j] + self.time_delays - delay):(
+                                                 i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1] - delay - 1), :])
                     self.keys_test[idx, :,
-                    delay * covid_test.model_data.shape[2]:(delay + 1) * covid_test.model_data.shape[2]] = \
-                        torch.from_numpy(covid_test.model_data[
-                                         (i * sum(covid_test.dates_len) + idx_cum_2[j] + self.time_delays - delay):(
-                                                 i * sum(covid_test.dates_len) + idx_cum_2[j + 1] - delay - 1), :,
+                    delay * covid_data.test_model_data.shape[2]:(delay + 1) * covid_data.test_model_data.shape[2]] = \
+                        torch.from_numpy(covid_data.test_model_data[
+                                         (i * sum(covid_data.test_dates_len) + idx_cum_2[j] + self.time_delays - delay):(
+                                                 i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1] - delay - 1), :,
                                          :])
-                    self.keys_test[idx, :, delay * covid_test.model_data.shape[2]] -= \
+                    self.keys_test[idx, :, delay * covid_data.test_model_data.shape[2]] -= \
                         torch.from_numpy(y_test[
-                                         (i * sum(covid_test.dates_len) + idx_cum_2[j] + self.time_delays - delay - 1):(
-                                                 i * sum(covid_test.dates_len) + idx_cum_2[j + 1] - delay - 2), :])
+                                         (i * sum(covid_data.test_dates_len) + idx_cum_2[j] + self.time_delays - delay - 1):(
+                                                 i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1] - delay - 2), :])
                     self.values_test[idx, :, :] = torch.from_numpy(
-                        covid_test.model_data[(i * sum(covid_test.dates_len) + self.time_delays + idx_cum_2[j] + 1):(
-                                i * sum(covid_test.dates_len) + idx_cum_2[j + 1]), :, :])
+                        covid_data.test_model_data[(i * sum(covid_data.test_dates_len) + self.time_delays + idx_cum_2[j] + 1):(
+                                i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1]), :, :])
                     self.y_test[idx, 0, 0] = torch.squeeze(
-                        torch.from_numpy(y_test[(i * sum(covid_test.dates_len) + self.time_delays + idx_cum_2[j] + 1):(
-                                i * sum(covid_test.dates_len) + idx_cum_2[j + 1])]))
+                        torch.from_numpy(y_test[(i * sum(covid_data.test_dates_len) + self.time_delays + idx_cum_2[j] + 1):(
+                                i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1])]))
         self.queries_test = self.queries_test.type(dtype)
         self.keys_test = self.keys_test.type(dtype)
         self.values_test = self.values_test.type(dtype)
@@ -1110,6 +1291,7 @@ class CovidTrainer(d2l.Trainer):
             loss = self.model.training_step(self.prepare_batch(batch))
             self.optim.zero_grad()
             with torch.no_grad():
+                print(loss)
                 loss.backward()
                 if self.gradient_clip_val > 0:  # To be discussed later
                     self.clip_gradients(self.gradient_clip_val, self.model)
