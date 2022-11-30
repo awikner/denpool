@@ -695,7 +695,7 @@ class CovidDataLoader(d2l.DataModule):
         self.n_loc_train = len(covid_data.train_locations)
         self.n_loc_test = len(covid_data.test_locations)
         # Create queries, keys, values for training data, covid_train
-        self.n_train = (len(self.dates_train) - len(covid_data.train_dates_len)) * self.n_loc_train
+        self.n_train = (len(self.dates_train) - len(covid_data.train_dates_len)) * self.n_loc_train + 1
         y_train = covid_data.train_y
         self.queries_train = torch.zeros((self.n_train,
                                           1,
@@ -975,6 +975,94 @@ class CovidAdditiveAttention(d2l.Module):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), self.lr)
 
+class CovidMultiValueAdditiveAttention(d2l.Module):
+    """Multi-Value Additive attention."""
+    def __init__(self, query_size, key_size, value_size, num_hiddens, dropout, lr, alphas, l1_reg = 0.001, **kwargs):
+        super(CovidMultiValueAdditiveAttention, self).__init__(**kwargs)
+        self.W_k = torch.nn.Linear(key_size, num_hiddens * value_size, bias = True)
+        self.W_q = torch.nn.Linear(query_size, num_hiddens * value_size, bias = False)
+        self.w_v = torch.nn.Linear(num_hiddens, value_size, bias = False)
+        self.dropout = torch.nn.Dropout(dropout)
+        self.sm = torch.nn.Softmax(dim = -2)
+        self.lr = lr
+        self.l1_reg = l1_reg
+        self.alphas = alphas
+        self.value_size = value_size
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def forward(self, queries, keys, values):
+        W_queries, W_keys = self.W_q(queries), self.W_k(keys)
+        # After dimension expansion, shape of queries: (batch_size, no. of
+        # queries, 1, num_hiddens) and shape of keys: (batch_size, 1, no. of
+        # key-value pairs, num_hiddens). Sum them up with broadcasting
+        features_unsqueezed = W_queries.unsqueeze(2) + W_keys.unsqueeze(1)
+        features = torch.tanh(features_unsqueezed).reshape(
+            features_unsqueezed.size(0), features_unsqueezed.size(1),
+            features_unsqueezed.size(2), self.value_size, -1
+        )
+        # There is only one output of self.w_v, so we remove the last
+        # one-dimensional entry from the shape. Shape of scores: (batch_size,
+        # no. of queries, no. of key-value pairs)
+        #self.attention_weights = torch.matmul(features, self.w_v).squeeze(-1)
+        scores = torch.sum(features * self.w_v.weight.reshape(1, 1, 1, self.value_size, -1), dim = -1)
+        self.attention_weights = self.sm(scores)
+        # self.attention_weights = masked_softmax(scores, valid_lens)
+        # Shape of values: (batch_size, no. of key-value pairs, value
+        # dimension)
+        return torch.sum(self.dropout(self.attention_weights) * values.unsqueeze(1), dim = -2, keepdim = False)
+
+    def loss(self, y_hat, y):
+        return weighted_interval_score(y_hat, y, self.alphas).mean()
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), self.lr)
+
+class CovidMultiHeadAdditiveAttention(d2l.Module):
+    """Multi-Value Additive attention."""
+    def __init__(self, query_size, key_size, value_size, num_heads, num_hiddens,
+                 dropout, lr, alphas, l1_reg = 0.001, **kwargs):
+        super(CovidMultiHeadAdditiveAttention, self).__init__(**kwargs)
+        self.W_k = torch.nn.Linear(key_size, num_hiddens * num_heads, bias = True)
+        self.W_q = torch.nn.Linear(query_size, num_hiddens * num_heads, bias = False)
+        self.w_v = torch.nn.Linear(num_hiddens, num_heads, bias = False)
+        self.W_out = torch.nn.Linear(num_heads * value_size, value_size)
+        self.dropout = torch.nn.Dropout(dropout)
+        self.sm = torch.nn.Softmax(dim = 2)
+        self.lr = lr
+        self.l1_reg = l1_reg
+        self.alphas = alphas
+        self.value_size = value_size
+        self.num_heads  = num_heads
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def forward(self, queries, keys, values):
+        W_queries, W_keys = self.W_q(queries), self.W_k(keys)
+        # After dimension expansion, shape of queries: (batch_size, no. of
+        # queries, 1, num_hiddens) and shape of keys: (batch_size, 1, no. of
+        # key-value pairs, num_hiddens). Sum them up with broadcasting
+        features_unsqueezed = W_queries.unsqueeze(2) + W_keys.unsqueeze(1)
+        features = torch.tanh(features_unsqueezed).reshape(
+            features_unsqueezed.size(0), features_unsqueezed.size(1),
+            features_unsqueezed.size(2), self.num_heads, -1
+        )
+        # There is only one output of self.w_v, so we remove the last
+        # one-dimensional entry from the shape. Shape of scores: (batch_size,
+        # no. of queries, no. of key-value pairs)
+        #self.attention_weights = torch.matmul(features, self.w_v).squeeze(-1)
+        scores = torch.sum(features * self.w_v.weight.reshape(1, 1, 1, self.num_heads, -1), dim = -1)
+        self.attention_weights = self.sm(scores).squeeze(1).transpose(1,2)
+        concat_out = torch.bmm(self.dropout(self.attention_weights), values).reshape(values.size(0), 1, -1)
+        # self.attention_weights = masked_softmax(scores, valid_lens)
+        # Shape of values: (batch_size, no. of key-value pairs, value
+        # dimension)
+        return self.W_out(concat_out)
+
+    def loss(self, y_hat, y):
+        return weighted_interval_score(y_hat, y, self.alphas).mean()
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), self.lr)
+
 class NoAttention(TimeSeriesAttention):
     """Additive attention."""
     def __init__(self, feature_size, num_hiddens, output_size, dropout, lr, l1_reg = 0.001, **kwargs):
@@ -1070,6 +1158,39 @@ class IdiotAttention(TimeSeriesAttention):
     def loss(self, y_hat, y):
         l = (y_hat.reshape(-1) - y.reshape(-1)) **2 /2
         return l.mean()
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), self.lr)
+
+    def exact_solve(self, queries, keys, values, y):
+        with torch.no_grad():
+            _ = self.forward(queries, keys, values)
+            bias_feature = torch.cat((self.feature, torch.ones(self.feature.size(0),1)),1)
+            info_mat     = torch.mm(bias_feature.transpose(0,1), bias_feature).detach().numpy()
+            target_mat   = torch.mm(bias_feature.transpose(0,1), y.squeeze(1)).detach().numpy()
+            print(info_mat.shape)
+            print(target_mat.shape)
+            Wout         = np.linalg.solve(info_mat, target_mat)
+            self.W.weight= torch.nn.Parameter(torch.from_numpy(Wout[:-1].T))
+            self.W.bias  = torch.nn.Parameter(torch.from_numpy(Wout[-1]))
+
+class CovidIdiotAttention(d2l.Module):
+    """Additive attention."""
+    def __init__(self, feature_size, output_size, dropout, lr, alphas, l1_reg = 0., **kwargs):
+        super(CovidIdiotAttention, self).__init__(**kwargs)
+        self.W   = torch.nn.Linear(feature_size, output_size, bias = True)
+        self.dropout = torch.nn.Dropout(dropout)
+        self.lr = lr
+        self.alphas = alphas
+        self.l1_reg = l1_reg
+
+    def forward(self, queries, keys, values):
+        self.feature = torch.cat((values, keys[:,:,:-values.size(2)]),
+                                 dim = 2).reshape(values.size(0), -1)
+        return self.W(self.feature).unsqueeze(1)
+
+    def loss(self, y_hat, y):
+        return weighted_interval_score(y_hat, y, self.alphas).mean()
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), self.lr)
@@ -1291,7 +1412,6 @@ class CovidTrainer(d2l.Trainer):
             loss = self.model.training_step(self.prepare_batch(batch))
             self.optim.zero_grad()
             with torch.no_grad():
-                print(loss)
                 loss.backward()
                 if self.gradient_clip_val > 0:  # To be discussed later
                     self.clip_gradients(self.gradient_clip_val, self.model)
