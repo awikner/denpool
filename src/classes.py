@@ -379,17 +379,17 @@ class LorenzPeriodicRhoTDENoDiffData(LorenzDataModule):
 class CovidDataAllTimes(d2l.DataModule):
     def __init__(self, truth_path, ensemble_path, ensemble_models, alphas_eval, prediction_type,
                  truth_type, train_start_end_dates, test_start_end_dates, train_locations, test_locations,
-                 rescale=None, interp_max = 2):
+                 rescale=None, interp_max = 2, extra_truth = None):
         super().__init__()
         self.save_hyperparameters()
         self.locations = sorted(list(set(train_locations).union(set(test_locations))))
         print(len(self.locations))
         self.get_date_range()
-        model_data, y = self.download()
+        model_data, y, extra_y = self.download()
         model_data = self.fillin_lin_interp_mean_persistence(model_data)
         if rescale == "inv_max":
-            self.rescale_inv_max(y)
-        self.train_test_split(model_data, y)
+            self.rescale_inv_max(y, extra_y)
+        self.train_test_split(model_data, y, extra_y)
 
     def get_date_range(self):
         all_dates = []
@@ -417,6 +417,10 @@ class CovidDataAllTimes(d2l.DataModule):
         step = self.prediction_type[1]
         self.train_dates_len = []
         self.test_dates_len  = []
+        if self.extra_truth:
+            extra_y = []
+        else:
+            extra_y = None
         for i, location in enumerate(self.locations):
             # Load in truth data from full data range, get all dates for true data
             targets = self.f_truth[location]['Cumulative ' + self.truth_type.split(' ')[1]][:]
@@ -429,6 +433,20 @@ class CovidDataAllTimes(d2l.DataModule):
                                     (targets_df.index < self.date_range[1])].index[::step]
             targets_temp = targets_df[(targets_df.index >= self.date_range[0]) & \
                                       (targets_df.index < self.date_range[1])].values[::step]
+            if self.extra_truth:
+                for j, type in enumerate(self.extra_truth):
+                    extra_targets = self.f_truth[location]['Cumulative ' + type.split(' ')[1]][:]
+                    extra_targets_df = pd.DataFrame(extra_targets['value'],
+                                              index=[target.decode('UTF-8') for target in extra_targets['date']])
+                    if 'Incident' in type:
+                        extra_targets_df = pd.DataFrame(extra_targets_df.subtract(extra_targets_df.shift(7, fill_value=0.)),
+                                              index=[target.decode('UTF-8') for target in extra_targets['date']])
+                    extra_targets_temp = extra_targets_df[(extra_targets_df.index >= self.date_range[0]) & \
+                                      (extra_targets_df.index < self.date_range[1])].values[::step]
+                    if (i == 0):
+                        extra_y.append(extra_targets_temp.astype(np.float32))
+                    else:
+                        extra_y[j] = np.concatenate((extra_y[j], extra_targets_temp), axis = 0)
             if (i == 0):
                 self.dates = np.array(dates_temp)
                 y = targets_temp.astype(np.float32)
@@ -456,7 +474,10 @@ class CovidDataAllTimes(d2l.DataModule):
                     self.test_dates = np.concatenate((self.test_dates, dates_temp), axis=0)
                 if i == 0:
                     self.test_dates_len.append(len(dates_temp))
-
+        if self.extra_truth:
+            if np.any(np.array([y.size for y in extra_y]) != y.size):
+                print('Target size: ', y.size)
+                print('Extra target sizes: ', [y.size for y in extra_y])
         # Initialize arrays for ensemble model data
         self.alphas = [float(a) for a in self.alphas_eval[1:]]
         self.alphas = [a / 2 for a in self.alphas] + [1 - a / 2 for a in self.alphas]
@@ -483,7 +504,7 @@ class CovidDataAllTimes(d2l.DataModule):
                                 self.f_ensemble[model][location][self.prediction_type[0]][alpha][:]['value'][idx]
                         else:
                             model_data[j * self.dates_len + k, i, m] = np.nan
-        return model_data, y
+        return model_data, y, extra_y
 
     def _nan_helper(self, y):
         """
@@ -576,12 +597,14 @@ class CovidDataAllTimes(d2l.DataModule):
             data[all_idxs, i, j] = y
         return data
 
-    def rescale_inv_max(self, y):
+    def rescale_inv_max(self, y, extra_y):
         """
         Rescale data for each location by dividing by the max value for that location in the
         true (training) data set. If the location is not in the training set, use the true value from the test set.
         """
         self.rescale_factors = {}
+        if self.extra_truth:
+            self.extra_rescale_factors = [{} for extra in self.extra_truth]
         for l, loc in enumerate(self.locations):
             if loc in self.train_locations:
                 dates_ind_dict = dict((k, i + l * self.dates_len) for i, k in \
@@ -592,9 +615,14 @@ class CovidDataAllTimes(d2l.DataModule):
 
                 #idx = slice(l * sum(self.dates_len), (l + 1) * sum(self.dates_len))
                 norm = np.amax(y[train_indices, :])
+
                 # y[idx, :] /= norm
                 # self.model_data[idx, :, :] /= norm
                 self.rescale_factors[loc] = norm
+                if self.extra_truth:
+                    for j, e_y in enumerate(extra_y):
+                        norm = np.amax(extra_y[j][train_indices, :])
+                        self.extra_rescale_factors[j][loc] = norm
             else:
                 dates_ind_dict = dict((k, i + l * self.dates_len) for i, k in \
                                       enumerate(self.dates[l * self.dates_len:(l + 1) * self.dates_len]))
@@ -607,13 +635,19 @@ class CovidDataAllTimes(d2l.DataModule):
                 # self.y[idx, :] /= norm
                 # self.model_data[idx, :, :] /= norm
                 self.rescale_factors[loc] = norm
+                if self.extra_truth:
+                    for j, e_y in enumerate(extra_y):
+                        norm = np.amax(extra_y[j][test_indices, :])
+                        self.extra_rescale_factors[j][loc] = norm
 
 
-    def train_test_split(self, model_data, y):
+
+    def train_test_split(self, model_data, y, extra_y):
         """
         Inputs:
             :param model_data:
             :param y:
+            :param extra_y:
         :return:
 
         Splits the model data and y into their respective portions, and saves them to the class.
@@ -634,11 +668,18 @@ class CovidDataAllTimes(d2l.DataModule):
             if l == 0:
                 self.train_model_data = model_data[train_indices]
                 self.train_y          = y[train_indices]
+                if extra_y:
+                    self.train_extra_y = []
+                    for j, e_y in enumerate(extra_y):
+                        self.train_extra_y.append(e_y[train_indices])
             else:
                 self.train_model_data = np.concatenate((self.train_model_data,
                                                    model_data[train_indices]), axis = 0)
                 self.train_y          = np.concatenate((self.train_y,
                                                    y[train_indices]), axis = 0)
+                if extra_y:
+                    for j, e_y in enumerate(extra_y):
+                        self.train_extra_y[j] = np.concatenate((self.train_extra_y[j], e_y[train_indices]), axis = 0)
         for l in test_l_indices:
             dates_ind_dict = dict((k, i + l * self.dates_len) for i, k in \
                                   enumerate(self.dates[l * self.dates_len:(l + 1) * self.dates_len]))
@@ -650,11 +691,18 @@ class CovidDataAllTimes(d2l.DataModule):
             if l == 0:
                 self.test_model_data = model_data[test_indices]
                 self.test_y = y[test_indices]
+                if extra_y:
+                    self.test_extra_y = []
+                    for j, e_y in enumerate(extra_y):
+                        self.test_extra_y.append(e_y[test_indices])
             else:
                 self.test_model_data = np.concatenate((self.test_model_data,
                                                    model_data[test_indices]), axis=0)
                 self.test_y = np.concatenate((self.test_y,
                                           y[test_indices]), axis=0)
+                if extra_y:
+                    for j, e_y in enumerate(extra_y):
+                        self.test_extra_y[j] = np.concatenate((self.test_extra_y[j], e_y[test_indices]), axis = 0)
 
 
 
@@ -663,13 +711,16 @@ class CovidDataAllTimes(d2l.DataModule):
 
 
 class CovidDataLoader(d2l.DataModule):
-    def __init__(self, covid_data, time_delays, batch_size=32, val_size=32, dtype=torch.float32):
+    def __init__(self, covid_data, time_delays, batch_size=32, val_size=32, dtype=torch.float32, use_wis_keys = False,
+                 use_diff_keys = True):
         super().__init__()
         self.save_hyperparameters(ignore=['covid_data'])
         self.alphas_eval = covid_data.alphas_eval
         rescale = False
         try:
             self.rescale_factors = covid_data.rescale_factors
+            if covid_data.extra_truth:
+                self.extra_rescale_factors = covid_data.extra_rescale_factors
             rescale = True
         except:
             print('Training and testing data have not been rescaled.')
@@ -678,10 +729,23 @@ class CovidDataLoader(d2l.DataModule):
                 idx = slice(k * sum(covid_data.train_dates_len), (k + 1) * sum(covid_data.train_dates_len))
                 covid_data.train_y[idx, :] /= self.rescale_factors[loc]
                 covid_data.train_model_data[idx, :] /= self.rescale_factors[loc]
+                if covid_data.extra_truth:
+                    for j in range(len(covid_data.extra_truth)):
+                        covid_data.train_extra_y[j][idx, :] /= self.extra_rescale_factors[j][loc]
             for k, loc in enumerate(covid_data.test_locations):
                 idx = slice(k * sum(covid_data.test_dates_len), (k + 1) * sum(covid_data.test_dates_len))
                 covid_data.test_y[idx, :] /= self.rescale_factors[loc]
                 covid_data.test_model_data[idx, :] /= self.rescale_factors[loc]
+                if covid_data.extra_truth:
+                    for j in range(len(covid_data.extra_truth)):
+                        covid_data.test_extra_y[j][idx, :] /= self.extra_rescale_factors[j][loc]
+
+        if use_wis_keys:
+            alphas_eval = torch.tensor([float(alpha) for alpha in self.alphas_eval[1:]]).reshape(1,1,-1)
+            wis_train   = weighted_interval_score(torch.tensor(covid_data.train_model_data),
+                                                  torch.tensor(covid_data.train_y).unsqueeze(-1), alphas_eval)
+            wis_test    = weighted_interval_score(torch.tensor(covid_data.test_model_data),
+                                                  torch.tensor(covid_data.test_y).unsqueeze(-1), alphas_eval)
 
         self.dates_train, self.dates_test = [], []
         idx = np.concatenate([[0], np.cumsum(covid_data.train_dates_len)])
@@ -697,12 +761,24 @@ class CovidDataLoader(d2l.DataModule):
         # Create queries, keys, values for training data, covid_train
         self.n_train = (len(self.dates_train) - len(covid_data.train_dates_len)) * self.n_loc_train + 1
         y_train = covid_data.train_y
+        if covid_data.extra_truth:
+            query_size = (y_train.shape[1] + sum([data.shape[1] for data in covid_data.train_extra_y])) *\
+                         self.time_delays
+            extra_truth_cumsum = np.append([0], np.cumsum(np.array([data.shape[1] for data in covid_data.train_extra_y])))
+        else:
+            query_size = y_train.shape[1] * self.time_delays
+
+        if use_wis_keys:
+            key_size = (covid_data.train_model_data.shape[2] + 1) * self.time_delays
+        else:
+            key_size = covid_data.train_model_data.shape[2] * self.time_delays
+        
         self.queries_train = torch.zeros((self.n_train,
                                           1,
-                                          y_train.shape[1] * self.time_delays))
+                                          query_size))
         self.keys_train = torch.zeros((self.n_train,
                                        covid_data.train_model_data.shape[1],
-                                       covid_data.train_model_data.shape[2] * self.time_delays))
+                                       key_size))
         self.values_train = torch.zeros((self.n_train,
                                          covid_data.train_model_data.shape[1],
                                          covid_data.train_model_data.shape[2]))
@@ -714,42 +790,55 @@ class CovidDataLoader(d2l.DataModule):
                 for delay in range(self.time_delays):
                     idx = slice(i * (len(self.dates_train) - (len(idx_cum) - 1)) + idx_cum[j], 
                                 i * (len(self.dates_train) - (len(idx_cum) - 1)) + idx_cum[j + 1])
-                    try:
-                        self.queries_train[idx, 0, delay * y_train.shape[1]:(delay + 1) * y_train.shape[1]] = \
-                            torch.from_numpy(y_train[
-                                         (i * sum(covid_data.train_dates_len) + idx_cum_2[j] + self.time_delays - delay):(
-                                                 i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1] - delay - 1), :])
-                    except:
-                        print('Exception for i = %d, j = %d' % (i, j))
-                    self.keys_train[idx, :,
-                    delay * covid_data.train_model_data.shape[2]:(delay + 1) * covid_data.train_model_data.shape[2]] = \
-                        torch.from_numpy(covid_data.train_model_data[
-                                         (i * sum(covid_data.train_dates_len) + idx_cum_2[j] + self.time_delays - delay):(
-                                                 i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1] - delay - 1), :,
-                                         :])
-                    self.keys_train[idx, :, delay * covid_data.train_model_data.shape[2]] -= \
-                        torch.from_numpy(y_train[
-                                         (i * sum(covid_data.train_dates_len) + idx_cum_2[
-                                             j] + self.time_delays - delay - 1):(
-                                                 i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1] - delay - 2), :])
-                    self.values_train[idx, :, :] = torch.from_numpy(
-                        covid_data.train_model_data[(i * sum(covid_data.train_dates_len) + self.time_delays + idx_cum_2[j] + 1):(
-                                i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1]), :, :])
-                    self.y_train[idx, 0, 0] = torch.squeeze(torch.from_numpy(
-                        y_train[(i * sum(covid_data.train_dates_len) + self.time_delays + idx_cum_2[j] + 1):(
-                                i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1])]))
+                    idx_q = slice((i * sum(covid_data.train_dates_len) + idx_cum_2[j] + self.time_delays - delay),
+                                  (i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1] - delay - 1))
+                    idx_k = slice((i * sum(covid_data.train_dates_len) + idx_cum_2[j] + self.time_delays - delay - 1),
+                                  (i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1] - delay - 2))
+                    idx_v = slice((i * sum(covid_data.train_dates_len) + self.time_delays + idx_cum_2[j] + 1),
+                                  (i * sum(covid_data.train_dates_len) + idx_cum_2[j + 1]))
+                    self.queries_train[idx, 0, delay * y_train.shape[1]:(delay + 1) * y_train.shape[1]] = \
+                        torch.from_numpy(y_train[idx_q, :])
+                    if covid_data.extra_truth:
+                        for k, train_extra_y in enumerate(covid_data.train_extra_y):
+                            self.queries_train[idx, 0, (y_train.shape[1] + extra_truth_cumsum[k]) * self.time_delays\
+                                                       + delay * train_extra_y.shape[1]:
+                                                       (y_train.shape[1] + extra_truth_cumsum[k]) * self.time_delays\
+                                                       + (delay+1) * train_extra_y.shape[1]] = \
+                                torch.from_numpy(train_extra_y[idx_q, :])
+                    self.keys_train[idx, :, delay * covid_data.train_model_data.shape[2]:\
+                                            (delay + 1) * covid_data.train_model_data.shape[2]] = \
+                        torch.from_numpy(covid_data.train_model_data[idx_q, :, :]) # The idx_q is correct!
+                    if use_wis_keys:
+                        self.keys_train[idx, :, covid_data.train_model_data.shape[2] * self.time_delays + delay] = \
+                            wis_train[idx_q,:,0] # The idx_q is correct!
+                    if use_diff_keys:
+                        self.keys_train[idx, :, delay * covid_data.train_model_data.shape[2]] -= \
+                            torch.from_numpy(y_train[idx_k, :])
+                    self.values_train[idx, :, :] = torch.from_numpy(covid_data.train_model_data[idx_v, :, :])
+                    self.y_train[idx, 0, 0] = torch.squeeze(torch.from_numpy(y_train[idx_v]))
         self.queries_train = self.queries_train.type(dtype)
         self.keys_train = self.keys_train.type(dtype)
         self.values_train = self.values_train.type(dtype)
         # Create queries, keys, values for test data, covid_test
         self.n_test = (len(self.dates_test) - len(covid_data.test_dates_len)) * self.n_loc_test
         y_test = covid_data.test_y
+        if covid_data.extra_truth:
+            query_size = (y_test.shape[1] + sum([data.shape[1] for data in covid_data.test_extra_y])) *\
+                         self.time_delays
+            extra_truth_cumsum = np.append([0], np.cumsum(np.array([data.shape[1] for data in covid_data.test_extra_y])))
+        else:
+            query_size = y_test.shape[1] * self.time_delays
+
+        if use_wis_keys:
+            key_size = (covid_data.test_model_data.shape[2] + 1) * self.time_delays
+        else:
+            key_size = covid_data.test_model_data.shape[2] * self.time_delays
         self.queries_test = torch.zeros((self.n_test,
                                          1,
-                                         y_test.shape[1] * self.time_delays))
+                                         query_size))
         self.keys_test = torch.zeros((self.n_test,
                                       covid_data.test_model_data.shape[1],
-                                      covid_data.test_model_data.shape[2] * self.time_delays))
+                                      key_size))
         self.values_test = torch.zeros((self.n_test,
                                         covid_data.test_model_data.shape[1],
                                         covid_data.test_model_data.shape[2]))
@@ -761,26 +850,32 @@ class CovidDataLoader(d2l.DataModule):
                 for delay in range(self.time_delays):
                     idx = slice(i * (len(self.dates_test) - (len(idx_cum) - 1)) + idx_cum[j],
                                 i * (len(self.dates_test) - (len(idx_cum) - 1)) + idx_cum[j + 1])
+                    idx_q = slice((i * sum(covid_data.test_dates_len) + idx_cum_2[j] + self.time_delays - delay),
+                                  (i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1] - delay - 1))
+                    idx_k = slice((i * sum(covid_data.test_dates_len) + idx_cum_2[j] + self.time_delays - delay - 1),
+                                  (i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1] - delay - 2))
+                    idx_v = slice((i * sum(covid_data.test_dates_len) + self.time_delays + idx_cum_2[j] + 1),
+                                  (i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1]))
                     self.queries_test[idx, 0, delay * y_test.shape[1]:(delay + 1) * y_test.shape[1]] = \
-                        torch.from_numpy(y_test[
-                                         (i * sum(covid_data.test_dates_len) + idx_cum_2[j] + self.time_delays - delay):(
-                                                 i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1] - delay - 1), :])
-                    self.keys_test[idx, :,
-                    delay * covid_data.test_model_data.shape[2]:(delay + 1) * covid_data.test_model_data.shape[2]] = \
-                        torch.from_numpy(covid_data.test_model_data[
-                                         (i * sum(covid_data.test_dates_len) + idx_cum_2[j] + self.time_delays - delay):(
-                                                 i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1] - delay - 1), :,
-                                         :])
-                    self.keys_test[idx, :, delay * covid_data.test_model_data.shape[2]] -= \
-                        torch.from_numpy(y_test[
-                                         (i * sum(covid_data.test_dates_len) + idx_cum_2[j] + self.time_delays - delay - 1):(
-                                                 i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1] - delay - 2), :])
-                    self.values_test[idx, :, :] = torch.from_numpy(
-                        covid_data.test_model_data[(i * sum(covid_data.test_dates_len) + self.time_delays + idx_cum_2[j] + 1):(
-                                i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1]), :, :])
-                    self.y_test[idx, 0, 0] = torch.squeeze(
-                        torch.from_numpy(y_test[(i * sum(covid_data.test_dates_len) + self.time_delays + idx_cum_2[j] + 1):(
-                                i * sum(covid_data.test_dates_len) + idx_cum_2[j + 1])]))
+                        torch.from_numpy(y_test[idx_q, :])
+                    if covid_data.extra_truth:
+                        for k, test_extra_y in enumerate(covid_data.test_extra_y):
+                            self.queries_test[idx, 0, (y_test.shape[1] + extra_truth_cumsum[k]) * self.time_delays \
+                                                       + delay * test_extra_y.shape[1]:
+                                                       (y_test.shape[1] + extra_truth_cumsum[k]) * self.time_delays \
+                                                       + (delay + 1) * test_extra_y.shape[1]] = \
+                                torch.from_numpy(test_extra_y[idx_q, :])
+                    self.keys_test[idx, :, delay * covid_data.test_model_data.shape[2]: \
+                                            (delay + 1) * covid_data.test_model_data.shape[2]] = \
+                        torch.from_numpy(covid_data.test_model_data[idx_q, :, :])  # The idx_q is correct!
+                    if use_wis_keys:
+                        self.keys_test[idx, :, covid_data.test_model_data.shape[2] * self.time_delays + delay] = \
+                            wis_test[idx_q, :, 0]  # The idx_q is correct!
+                    if use_diff_keys:
+                        self.keys_test[idx, :, delay * covid_data.test_model_data.shape[2]] -= \
+                            torch.from_numpy(y_test[idx_k, :])
+                    self.values_test[idx, :, :] = torch.from_numpy(covid_data.test_model_data[idx_v, :, :])
+                    self.y_test[idx, 0, 0] = torch.squeeze(torch.from_numpy(y_test[idx_v]))
         self.queries_test = self.queries_test.type(dtype)
         self.keys_test = self.keys_test.type(dtype)
         self.values_test = self.values_test.type(dtype)
