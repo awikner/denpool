@@ -4,7 +4,7 @@ import numpy as np
 from datetime import datetime
 from src.helpers import weighted_interval_score
 
-def compare_ensemble(models, model_data, covidhub_data, locations_test, alphas_eval, test_start, test_end,
+def compare_ensemble(models, model_data_idxs, model_datasets, covidhub_data, locations_test, alphas_eval, test_start, test_end,
                      locations_plot = None, location_names = None,
                      pred_type = '1_wk_inc_death', pred_days = 7,
                      saveplots = True, figsize = (6,6), model_names = None,
@@ -18,19 +18,26 @@ def compare_ensemble(models, model_data, covidhub_data, locations_test, alphas_e
     if not model_names:
         model_names = ['Model %d' % (i+1) for i in range(len(models))]
 
-    for i, (query, key, value, y) in enumerate(model_data.get_dataloader(False)):
-        if i == 0:
-            queries_val = query
-            keys_val = key
-            values_val = value
-            y_val = y
-        else:
-            queries_val = torch.cat((queries_val, query), dim=0)
-            keys_val = torch.cat((keys_val, key), dim=0)
-            values_val = torch.cat((values_val, value), dim=0)
-            y_val = torch.cat((y_val, y), dim=0)
+    full_model_data = []
+    for k, model_data in enumerate(model_datasets):
+        for i, (query, key, value, y) in enumerate(model_data.get_dataloader(False)):
+            if i == 0:
+                queries_val = query
+                keys_val = key
+                values_val = value
+                y_val = y
+            else:
+                queries_val = torch.cat((queries_val, query), dim=0)
+                keys_val = torch.cat((keys_val, key), dim=0)
+                values_val = torch.cat((values_val, value), dim=0)
+                y_val = torch.cat((y_val, y), dim=0)
+        full_model_data.append({'queries_val' : queries_val,
+                                'keys_val': keys_val,
+                                'values_val': values_val,
+                                'y_val': y_val})
 
-    tests_per_loc = (y_val.size(0) / len(locations_test))
+
+    tests_per_loc = (full_model_data[0]['y_val'].size(0) / len(locations_test))
     if (y_val.size(0) / len(locations_test)) % 1 > 0.:
         raise ValueError('Testing data is not evenly split between locations.')
     tests_per_loc = int(tests_per_loc)
@@ -44,15 +51,20 @@ def compare_ensemble(models, model_data, covidhub_data, locations_test, alphas_e
             values_ensemble = torch.cat((values_ensemble, value), dim=0)
             y_ensemble = torch.cat((y_ensemble, y), dim=0)
 
-    models_out = [model.forward(queries_val, keys_val, values_val).detach() for model in models]
+    models_out = [model.forward(full_model_data[idx]['queries_val'], full_model_data[idx]['keys_val'],
+                                full_model_data[idx]['values_val']).detach() for model, idx in\
+                                zip(models, model_data_idxs)]
     if hasattr(model_data, 'rescale_factors'):
         for l, loc in enumerate(locations_test):
-            for j in range(len(models)):
-                models_out[j][l * tests_per_loc:(l + 1) * tests_per_loc, :, :] *= model_data.rescale_factors[loc]
-            y_val[l * tests_per_loc:(l + 1) * tests_per_loc, :, :] *= model_data.rescale_factors[loc]
+            for j, idx in zip(range(len(models)), model_data_idxs):
+                models_out[j][l * tests_per_loc:(l + 1) * tests_per_loc, :, :] *= model_datasets[idx].rescale_factors[loc]
+            for j in range(len(full_model_data)):
+                full_model_data[j]['y_val'][l * tests_per_loc:(l + 1) * tests_per_loc, :, :] *=\
+                    model_datasets[j].rescale_factors[loc]
     #attention_weights = model.attention_weights.detach()
-    wis_ensemble = weighted_interval_score(values_ensemble, y_val, alphas_eval)
-    wis_models = [weighted_interval_score(model_out, y_val, alphas_eval) for model_out in models_out]
+    wis_ensemble = weighted_interval_score(values_ensemble, y_ensemble, alphas_eval)
+    wis_models = [weighted_interval_score(model_out, full_model_data[idx]['y_val'], alphas_eval) for model_out, idx\
+                  in zip(models_out, model_data_idxs)]
     if log:
         mean_str = 'Log WIS'
         wis_ensemble = torch.log(wis_ensemble)
@@ -82,7 +94,7 @@ def compare_ensemble(models, model_data, covidhub_data, locations_test, alphas_e
         #for j, (wis_model, model_name) in enumerate(zip(wis_models, model_names)):
         #    ax1.plot(wis_model[i * num_dates:(i + 1) * num_dates, 0, 0], markers[j],
         #             label='%s' % model_name)
-        ax2.plot(y_val[i*num_dates: (i+1) * num_dates, 0, 0], 'x:',  label = 'Ground Truth')
+        ax2.plot(y_ensemble[i*num_dates: (i+1) * num_dates, 0, 0], 'x:',  label = 'Ground Truth')
         _, x_max = ax1.get_xlim()
         #print(scaled_ground_truth)
         #plt.plot(scaled_ground_truth, '--', label = 'Ground Truth (Scaled)')

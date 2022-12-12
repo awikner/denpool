@@ -6,6 +6,7 @@ import pandas as pd
 import timeit
 from matplotlib import pyplot as plt
 from datetime import datetime
+import sys, os
 dtype = torch.float32
 torch.set_default_dtype(dtype)
 torch.set_flush_denormal(True)
@@ -32,12 +33,12 @@ data_start = '20-05-09'
 data_end   = '22-11-05'
 #train_end  = '20-08-22'
 #test_end   = '21-02-20'
-train_end  = '21-05-29'
-test_end   = '21-10-30'
+#train_end  = '21-05-29'
+#test_end   = '21-10-30'
 #train_end  = '21-12-11'
 #test_end   = '22-06-18'
-#train_end  = '22-07-02'
-#test_end   = '22-11-05'
+train_end  = '22-07-02'
+test_end   = '22-11-05'
 train_start, test_start = get_start_dates(dates, train_end, test_end, time_delays)
 train_start_end = [(data_start, train_end), (train_start, data_end)]
 test_start_end  = [(test_start, test_end)]
@@ -59,22 +60,26 @@ def configure_optimizers(self):
 #@d2l.add_to_class(CovidAdditiveAttention)
 #def loss(self, y_hat, y):
 #    return torch.log(weighted_interval_score(y_hat, y, self.alphas)).mean()
-covid_data = torch.load('covid_dataloader_td5_start_%s_end_%s.pth' % (train_start_end[0][1], test_start_end[0][1]))
-covid_ensemble_data = torch.load('covid_ensemble_dataloader_td5_start_%s_end_%s.pth' %\
-                                 (train_start_end[0][1], test_start_end[0][1]))
+covid_data = torch.load(os.path.join('dataloaders',
+    'covid_dataloader_td5_wwis_start_%s_end_%s.pth' % (train_start_end[0][1], test_start_end[0][1])))
+covid_data_nowis = torch.load(os.path.join('dataloaders',
+    'covid_dataloader_td5_start_%s_end_%s.pth' % (train_start_end[0][1], test_start_end[0][1])))
+covid_ensemble_data = torch.load(os.path.join('dataloaders', 'covid_ensemble_dataloader_td5_start_%s_end_%s.pth' %\
+    (train_start_end[0][1], test_start_end[0][1])))
 time_delay = 5
 #dtype = torch.float64
 #torch.set_default_dtype(dtype)
 output_size = 1+2*(len(alphas)-1)
-query_size, key_size, num_hidden, dropout, lr, epochs = time_delay, output_size*time_delay, 1000, 0.1, 5e-5, 201
+query_size, key_size, num_hidden, dropout, lr, epochs = time_delay, (output_size+1)*time_delay, 1000, 0.1, 5e-5, 201
 alphas_eval = torch.FloatTensor([float(alpha) for alpha in covid_data.alphas_eval[1:]]).reshape(1,1,-1)
 
 attention   = CovidAdditiveAttention(query_size, key_size, num_hidden, dropout, lr, alphas_eval, l1_reg = 0.)
 attention.device = "cpu"
 #trainer = CovidTrainer(max_epochs = epochs)
-attention.weight_decay = 1e-6
-attention.load_state_dict(torch.load('covid_attention_start_%s_end_%s_%dstep_%d_reg%0.1e_dropout%0.1f.params'\
-           % (train_start_end[0][1], test_start_end[0][1], time_delay, num_hidden, attention.weight_decay, dropout)))
+attention.weight_decay = 1e-4
+attention.load_state_dict(torch.load(os.path.join('model_params',
+    'covid_attention_wwis_start_%s_end_%s_%dstep_%d_reg%0.1e_dropout%0.1f.params'\
+           % (train_start_end[0][1], test_start_end[0][1], time_delay, num_hidden, attention.weight_decay, dropout))))
 attention.dropout = torch.nn.Dropout(0.0)
 
 @d2l.add_to_class(CovidIdiotAttention)
@@ -87,21 +92,23 @@ dropout, lr, epochs = 0.0, 5e-5, 201
 idiot   = CovidIdiotAttention(feature_size, output_size, dropout, lr, alphas_eval, l1_reg = 0.)
 idiot.device = "cpu"
 idiot.weight_decay = 0.0
-idiot.load_state_dict(torch.load('covid_idiot_start_%s_end_%s_%dstep_reg%0.1e_dropout%0.1f.params'\
-           % (train_start_end[0][1], test_start_end[0][1], time_delay, idiot.weight_decay, dropout)))
+idiot.load_state_dict(torch.load(os.path.join('model_params',
+            'covid_idiot_start_%s_end_%s_%dstep_reg%0.1e_dropout%0.1f.params'\
+           % (train_start_end[0][1], test_start_end[0][1], time_delay, idiot.weight_decay, dropout))))
 
 @d2l.add_to_class(CovidMultiValueAdditiveAttention)
 def configure_optimizers(self):
     return torch.optim.Adam(self.parameters(), self.lr, weight_decay = self.weight_decay)
 output_size = 1+2*(len(alphas)-1)
 num_heads = output_size
-query_size, key_size, num_hidden, dropout, lr, epochs = time_delay, output_size*time_delay, 100, 0.1, 5e-5, 201
+query_size, key_size, num_hidden, dropout, lr, epochs = time_delay, (output_size+1)*time_delay, 100, 0.0, 5e-5, 201
 mhattention   = CovidMultiHeadAdditiveAttention(query_size, key_size, output_size, num_heads, num_hidden,
                                               dropout, lr, alphas_eval, l1_reg = 0.)
 mhattention.device = "cpu"
-mhattention.weight_decay = 1e-6
-mhattention.load_state_dict(torch.load('covid_mhattention_start_%s_end_%s_%dstep_%d_reg%0.1e_dropout%0.1f.params'\
-           % (train_start_end[0][1], test_start_end[0][1], time_delay, num_hidden, mhattention.weight_decay, dropout)))
+mhattention.weight_decay = 1e-5
+mhattention.load_state_dict(torch.load(os.path.join('model_params',
+            'covid_mhattention_wwis_start_%s_end_%s_%dstep_%d_reg%0.1e_dropout%0.1f.params'\
+           % (train_start_end[0][1], test_start_end[0][1], time_delay, num_hidden, mhattention.weight_decay, dropout))))
 mhattention.dropout = torch.nn.Dropout(0.0)
 
 alphas_eval = torch.tensor([float(alpha) for alpha in alphas[1:]]).reshape(1,1,-1)
@@ -111,6 +118,8 @@ test_start_datetime = datetime.strptime(train_end, '%y-%m-%d') + timedelta(days=
 test_start_date     = test_start_datetime.strftime("%y-%m-%d")
 models = [idiot, attention, mhattention]
 model_names = ['Linear Regression', 'Add. Attention', 'Multi-Head Attention']
-compare_ensemble(models, covid_data, covid_ensemble_data, test_locations, alphas_eval, test_start_date, test_end,
+covid_datasets = [covid_data, covid_data_nowis]
+model_data_idxs = [1, 0, 0]
+compare_ensemble(models, model_data_idxs, covid_datasets, covid_ensemble_data, test_locations, alphas_eval, test_start_date, test_end,
                 locations_plot = ['24'], location_names = ['Maryland'], pred_type = '1 Week Inc. Deaths',
-                saveplots = True, model_names = model_names, log = False, figsize = (5,4.5))
+                saveplots = False, model_names = model_names, log = False, figsize = (5,4.5))
